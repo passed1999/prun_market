@@ -10,6 +10,8 @@ import { estimateRoute } from "../routes/estimate";
 import { formatDuration } from "../routes/flight";
 import type { Base } from "../routes/fio";
 import { account, baseProducts, FioError, listBases, resupply } from "../routes/fio";
+import { buildBuyPlan } from "../routes/act";
+import { fio } from "../data/sources";
 import { copyText, download, ImportError, parseFile, safeName, toText } from "../routes/io";
 import type { MaterialGroup, RouteDoc, Step, Waypoint } from "../routes/model";
 import { abs, cap, destinationLabel, newGroup, newId, newRoute, newWaypoint } from "../routes/model";
@@ -119,6 +121,32 @@ async function exportGame(how: "file" | "copy") {
   if (how === "file") download(`game-${safeName(route.value.name)}.json`, result.value.game);
   else if (!(await copyText(toText(result.value.game)))) { say("浏览器不让写剪贴板，请改用导出成文件。", true); return; }
   say(`${how === "file" ? "已导出" : "已复制"}：${result.value.game.waypoints.length} 个 waypoint、${stepCount.value} 个步骤。`);
+}
+
+/** 只采购的 XIT ACT 包：在空间站装的货，按交易所汇总成一张采购单 */
+async function exportBuyAct(how: "file" | "copy") {
+  if (errors.value.length) {
+    say(`还有 ${errors.value.length} 处问题没解决，先改掉标红的地方再生成采购单。`, true);
+    return;
+  }
+  let stations;
+  try {
+    stations = await fio.stations();
+  } catch {
+    say("空间站的清单取不到，没法判断哪些站有交易所，请稍后重试。", true);
+    return;
+  }
+  const plan = buildBuyPlan(result.value.game, stations);
+  const skipped = plan.open.length ? `「装到满」的 ${plan.open.join("、")} 没有确切数量，没写进去。` : "";
+  if (!plan.pack) {
+    say(`这条路线没有在空间站按确切数量装货的步骤，没有要采购的东西。${skipped}`, true);
+    return;
+  }
+  if (how === "file") download(`act-buy-${safeName(route.value.name)}.json`, plan.pack);
+  else if (!(await copyText(toText(plan.pack)))) { say("浏览器不让写剪贴板，请改用存成文件。", true); return; }
+  const lines = plan.byExchange.map((e) =>
+    `${e.exchange}（${e.station}）${Object.entries(e.materials).map(([t, n]) => `${t} ${n}`).join("、")}`);
+  say(`采购单${how === "file" ? "已存成文件" : "已复制"}，在游戏里 XIT ACT 导入：${lines.join("；")}。${skipped}`, plan.open.length > 0);
 }
 
 /** 用到的补给组如果是很久以前算的，导出的数量就不准了 */
@@ -555,6 +583,9 @@ function importPaste() {
         <span class="pair" title="这条路线的配置（材料组与引用原样保留）">
           <button type="button" @click="saveRoute('file')">存路线文件</button>
           <button type="button" title="复制路线的 json" @click="saveRoute('copy')">复制</button></span>
+        <span class="pair" title="只采购的 XIT ACT 包：把在空间站装货的东西按交易所汇总，在游戏里导入后一键下买单（不转运）">
+          <button type="button" @click="exportBuyAct('file')">采购 ACT</button>
+          <button type="button" title="复制采购 ACT 的 json" @click="exportBuyAct('copy')">复制</button></span>
         <span class="pair" title="展开成游戏里的逐材料步骤，交给游戏内脚本">
           <button type="button" class="primary" @click="exportGame('file')">导出给游戏</button>
           <button type="button" class="primary" title="复制导出的 json，到游戏内脚本里粘贴" @click="exportGame('copy')">复制</button></span>
