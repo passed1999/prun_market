@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import type { Issue, LegLoad, MaterialInfo } from "../../routes/compile";
-import { stepLines, summarize } from "../../routes/compile";
+import { mirrorLines, stepLines, summarize } from "../../routes/compile";
 import { clearDrag, drag } from "../../routes/drag";
 import type { MaterialGroup, Op, RouteDoc, Step, StepKind, Waypoint } from "../../routes/model";
 import { destinationLabel, newStep } from "../../routes/model";
@@ -80,14 +80,25 @@ function pickGroup(step: Step, id: string) {
 }
 
 /** 材料组 / 引用步骤展开后的摘要 */
-function digest(step: Step): { text: string; chips: string[]; more: number; bad: boolean } {
+function digest(step: Step): { text: string; chips: string[]; more: number; bad: boolean; covered: string } {
   let lines;
+  let covered = "";
   try {
-    lines = stepLines(props.route, groupMap.value, step);
+    if (step.kind === "mirror") {
+      const got = mirrorLines(props.route, groupMap.value, step);
+      lines = got.lines;
+      covered = Object.entries(got.covered).map(([t, n]) => (n === "all" ? `${t} 全部` : `${t} ${n}`)).join("、");
+    } else {
+      lines = stepLines(props.route, groupMap.value, step);
+    }
   } catch {
-    return { text: "引用绕了一圈回到自己", chips: [], more: 0, bad: true };
+    return { text: "引用绕了一圈回到自己", chips: [], more: 0, bad: true, covered: "" };
   }
-  if (!lines.length) return { text: "没有内容", chips: [], more: 0, bad: true };
+  if (!lines.length) {
+    return covered
+      ? { text: "途中已经装够，这里不用再装", chips: [], more: 0, bad: false, covered }
+      : { text: "没有内容", chips: [], more: 0, bad: true, covered: "" };
+  }
   const { exact, open } = summarize(lines);
   let weight = 0;
   let volume = 0;
@@ -100,7 +111,7 @@ function digest(step: Step): { text: string; chips: string[]; more: number; bad:
     ...open.map((t) => `${t} ∞`),
   ];
   const size = Object.keys(props.materials).length ? ` · ${weight.toFixed(1)} t · ${volume.toFixed(1)} m³` : "";
-  return { text: `${chips.length} 种${size}`, chips: chips.slice(0, 8), more: Math.max(0, chips.length - 8), bad: false };
+  return { text: `${chips.length} 种${size}`, chips: chips.slice(0, 8), more: Math.max(0, chips.length - 8), bad: false, covered };
 }
 
 // ---- 拖放：步骤换顺序 / 挪到别的 waypoint，材料组从左边拖进来 ----
@@ -228,6 +239,9 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
               {{ digest(step).text }}
               <span class="chips"><i v-for="c in digest(step).chips" :key="c">{{ c }}</i>
                 <i v-if="digest(step).more">+{{ digest(step).more }}</i></span>
+              <span v-if="digest(step).covered" class="covered"
+                    title="这些是这一站另外写明要装的，或途中别的站会装上来的，已经从这个引用里扣掉，不会装两遍">
+                已扣掉途中会有的：{{ digest(step).covered }}</span>
             </span>
           </span>
         </template>
@@ -318,6 +332,7 @@ input, select { background: #23262e; color: #eee; border: 1px solid #444; paddin
 select.missing { border-color: #a04848; color: #e08a8a; }
 .digest { color: #8a8f99; }
 .digest.warn { color: #c9b06a; }
+.covered { display: block; margin-top: 2px; color: #7fb37f; }
 .chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
 .chips i { font-style: normal; background: #2a2e38; color: #c5ccd8; padding: 0 5px; border-radius: 3px;
            font-variant-numeric: tabular-nums; }

@@ -4,14 +4,15 @@
  * 展开规则：
  *   材料组        每种材料一个步骤，最小 = 最大 = 组里的数量（精确值，装不够 / 卸不够就等）
  *   引用          取被引用 waypoint 里所有同类（装或卸）步骤展开后的内容，换成本步骤的方向；
- *                 数量照抄，「capacity」照抄（装 = 装到满，卸 = 船上全部）
+ *                 数量照抄，「capacity」照抄（装 = 装到满，卸 = 船上全部）。
+ *                 「装 ← 某站的卸货内容」会扣掉途中已经装上的部分，见 mirrorLines
  *   其余          一一对应
  *   自动运单      路线开了「每站自动装卸运单」时，每一站最前面加卸运单、最后面加装运单；
  *                 那一站自己已经有对应步骤的就不再加
  * 各步骤互相独立、按界面顺序输出，同一种材料出现多次不会合并（除非勾了「合并相邻」）。
  */
 import type {
-  Amount, GameRoute, GameStep, GameWaypoint, MaterialGroup, Op, RouteDoc, Step, Waypoint,
+  Amount, GameRoute, GameStep, GameWaypoint, MaterialGroup, MirrorStep, Op, RouteDoc, Step, Waypoint,
 } from "./model";
 import { abs, destinationLabel } from "./model";
 
@@ -61,13 +62,79 @@ export function stepLines(route: RouteDoc, groups: Groups, step: Step, trail: st
       .filter(([, n]) => n > 0)
       .map(([ticker, n]) => ({ ticker, min: abs(n), max: abs(n), retain: 0 }));
   }
-  if (step.kind === "mirror") {
-    if (trail.includes(step.id)) throw new CycleError();
-    const wp = route.waypoints.find((w) => w.id === step.waypointId);
-    if (!wp) return [];
-    return opLines(route, groups, wp, step.sourceOp, [...trail, step.id]).map((l) => ({ ...l, retain: 0 }));
-  }
+  if (step.kind === "mirror") return mirrorLines(route, groups, step, trail).lines;
   return [];
+}
+
+export interface MirrorResult {
+  lines: Line[];
+  /** 因为途中已经装了而少装的数量；"all" = 途中有「装到满」，这里整种不装 */
+  covered: Record<string, number | "all">;
+}
+
+/**
+ * 引用步骤展开后的内容。
+ *
+ * 「在这里装 X 站要卸的东西」时，要扣掉到 X 之前船上已经会有的那部分，不然同一批货会装两遍：
+ *   - 这一站自己另外写明要装的（单种材料、材料组）
+ *   - 从这一站到 X 之间的各站装上来的
+ *   途中各站卸掉的会先把这些「已有的」消耗掉——那是给它们自己用的，轮不到 X。
+ * 只对「装货 ← 卸货内容」这一种引用做扣减；X 排在这一站前面且路线不循环时也不扣（那不是送货）。
+ */
+export function mirrorLines(route: RouteDoc, groups: Groups, step: MirrorStep, trail: string[] = []): MirrorResult {
+  if (trail.includes(step.id)) throw new CycleError();
+  const target = route.waypoints.find((w) => w.id === step.waypointId);
+  if (!target) return { lines: [], covered: {} };
+  const next = [...trail, step.id];
+  const wanted = opLines(route, groups, target, step.sourceOp, next).map((l) => ({ ...l, retain: 0 }));
+  if (step.op !== "LOAD" || step.sourceOp !== "UNLOAD") return { lines: wanted, covered: {} };
+
+  const list = route.waypoints;
+  const here = list.findIndex((w) => w.steps.some((s) => s.id === step.id));
+  const there = list.indexOf(target);
+  if (here < 0 || here === there || (there < here && !route.repeats)) return { lines: wanted, covered: {} };
+
+  // 到 X 之前船上已有的：先算这一站自己写明装的，再顺着途中各站的步骤一步步加减
+  const aboard: Record<string, number> = {};
+  const open = new Set<string>();
+  const apply = (op: Op, lines: Line[]) => {
+    for (const l of lines) {
+      if (op === "LOAD") {
+        if (l.max.type === "CAPACITY") open.add(l.ticker);
+        else aboard[l.ticker] = (aboard[l.ticker] ?? 0) + l.max.units;
+      } else if (l.max.type === "CAPACITY") {
+        aboard[l.ticker] = 0;
+        open.delete(l.ticker);
+      } else {
+        aboard[l.ticker] = Math.max(0, (aboard[l.ticker] ?? 0) - l.max.units);
+      }
+    }
+  };
+  for (const s of list[here].steps) {
+    if ((s.kind === "material" || s.kind === "group") && s.op === "LOAD") apply("LOAD", stepLines(route, groups, s, next));
+  }
+  for (let i = (here + 1) % list.length; i !== there; i = (i + 1) % list.length) {
+    for (const s of list[i].steps) {
+      if (s.kind === "material" || s.kind === "group" || s.kind === "mirror") apply(s.op, stepLines(route, groups, s, next));
+    }
+  }
+
+  const covered: MirrorResult["covered"] = {};
+  const lines: Line[] = [];
+  for (const l of wanted) {
+    if (open.has(l.ticker)) { covered[l.ticker] = "all"; continue; }
+    if (l.max.type === "CAPACITY") { lines.push(l); continue; }
+    const have = Math.min(aboard[l.ticker] ?? 0, l.max.units);
+    if (have > 0) {
+      aboard[l.ticker] -= have;
+      const was = covered[l.ticker];
+      covered[l.ticker] = (typeof was === "number" ? was : 0) + have;
+    }
+    const need = l.max.units - have;
+    if (need <= 0) continue;
+    lines.push({ ...l, min: l.min.type === "ABSOLUTE" ? abs(Math.min(l.min.units, need)) : l.min, max: abs(need) });
+  }
+  return { lines, covered };
 }
 
 /** 一个 waypoint 里所有装（或卸）步骤展开后的内容，按步骤顺序 */
@@ -187,7 +254,7 @@ export function compile(route: RouteDoc, groupList: MaterialGroup[], opts: Compi
           issues.push({ level: "error", ...here, text: "引用绕了一圈回到自己，无法展开。" });
           continue;
         }
-        if (!lines.length) {
+        if (!lines.length && !(s.kind === "mirror" && Object.keys(mirrorLines(route, groups, s).covered).length)) {
           issues.push({ level: "warn", ...here, text: "这一步展开后没有任何材料。" });
         }
         for (const l of lines) {

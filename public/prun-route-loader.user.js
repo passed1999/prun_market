@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PrUn Route Loader
 // @namespace    prun-market
-// @version      0.4.0
+// @version      0.5.0
 // @description  把路线编辑器导出的 json 半自动配置到游戏里的 RT（每点一下执行一步）
 // @match        https://apex.prosperousuniverse.com/*
 // @grant        none
@@ -15,7 +15,7 @@
  *   3. 你每点一次「执行下一步」，脚本替你在 RT 界面上做一个操作（填表 + 点一次保存 / 添加 / 删除）
  *   4. 做完后重新读状态再比。所以中途停下、刷新页面、手动改过，都可以接着做
  *
- * 一次点击只对应一次发给服务器的操作，脚本不会自己连续执行。
+ * 默认一次点击只做一个操作。「自动执行」会一步接一步地做，每秒最多一步，出错或做完自己停。
  * 脚本只动你在面板里选中的那一条路线，不会删除路线，不会分配船。
  *
  * 界面结构与字段在 2026-11 的游戏版本上实测；游戏更新后若某一步找不到按钮，脚本会停下并说明卡在哪。
@@ -259,15 +259,13 @@
   const buttonByText = (root, text) => Array.from(root.querySelectorAll("button"))
     .find((b) => b.textContent.trim().toLowerCase() === text.toLowerCase());
 
+  // 游戏的数据先变、界面后画：找元素一律等它出现，不然连续执行时会扑空
   function waypointEl(w, i) {
-    const el = w.querySelectorAll('[class*="Waypoint__container"]')[i];
-    if (!el) throw new StepError(`界面上找不到第 ${i + 1} 站。`);
-    return el;
+    return waitFor(() => w.querySelectorAll('[class*="Waypoint__container"]')[i], `界面上出现第 ${i + 1} 站`, 5000);
   }
-  function stepEl(w, i, j) {
-    const el = waypointEl(w, i).querySelectorAll('[class*="Step__container"]')[j];
-    if (!el) throw new StepError(`界面上找不到第 ${i + 1} 站的第 ${j + 1} 步。`);
-    return el;
+  async function stepEl(w, i, j) {
+    const wp = await waypointEl(w, i);
+    return waitFor(() => wp.querySelectorAll('[class*="Step__container"]')[j], `界面上出现第 ${i + 1} 站的第 ${j + 1} 步`, 5000);
   }
 
   /** 表单里标题是 label 的那一行 */
@@ -424,7 +422,7 @@
         return;
       }
       case "editWaypoint": {
-        waypointEl(w, act.i).querySelector('button[title="Edit waypoint"]').click();
+        (await waypointEl(w, act.i)).querySelector('button[title="Edit waypoint"]').click();
         const form = await waitFor(() => overlayForm(w), "waypoint 的编辑表单");
         const now = cur().waypoints[act.i];
         if (!sameDest(now.destination, tw.destination)) {
@@ -445,14 +443,14 @@
       }
       case "deleteWaypoint": {
         const count = cur().waypoints.length;
-        waypointEl(w, act.i).querySelector('button[title="Delete waypoint"]').click();
+        (await waypointEl(w, act.i)).querySelector('button[title="Delete waypoint"]').click();
         await waitFor(() => cur().waypoints.length === count - 1, "这一站被删掉");
         return;
       }
       case "addStep": {
         const count = cur().waypoints[act.i].steps.length;
         const type = tw.steps[act.j].type;
-        const btn = Array.from(waypointEl(w, act.i).querySelectorAll('[class*="Waypoint__commandsSteps"] button'))
+        const btn = Array.from((await waypointEl(w, act.i)).querySelectorAll('[class*="Waypoint__commandsSteps"] button'))
           .find((b) => b.textContent.trim() === ADD_BUTTON[type]);
         if (!btn) throw new StepError(`找不到添加「${STEP_NAME[type]}」的按钮。`);
         btn.click();
@@ -461,13 +459,13 @@
       }
       case "deleteStep": {
         const count = cur().waypoints[act.i].steps.length;
-        stepEl(w, act.i, act.j).querySelector('button[title="Delete step"]').click();
+        (await stepEl(w, act.i, act.j)).querySelector('button[title="Delete step"]').click();
         await waitFor(() => cur().waypoints[act.i].steps.length === count - 1, "这一步被删掉");
         return;
       }
       case "editStep": {
         const ts = tw.steps[act.j];
-        stepEl(w, act.i, act.j).querySelector('button[title="Edit step"]').click();
+        (await stepEl(w, act.i, act.j)).querySelector('button[title="Edit step"]').click();
         const form = await waitFor(() => overlayForm(w), "步骤的编辑表单");
         await fillStep(form, ts);
         await saveForm(w, form, () => {
@@ -489,7 +487,8 @@
 
   // ---------- 面板 ----------
 
-  const state = { target: null, routeId: "", busy: false, lastKey: "", repeats: 0 };
+  const state = { target: null, routeId: "", busy: false, auto: false, lastKey: "", repeats: 0 };
+  const AUTO_INTERVAL_MS = 1000;
   const NEW = "__new__";
 
   const css = `
@@ -504,7 +503,9 @@
   #prl [hidden]{display:none!important}
   #prl button,#prl select{background:#2b3038;color:#eee;border:1px solid #555;padding:3px 8px;font-size:12px;cursor:pointer}
   #prl select{width:100%}
-  #prl button.go{background:#f7a600;color:#222;border-color:#f7a600;font-weight:bold;padding:6px 8px}
+  #prl button.go{background:#f7a600;color:#222;border-color:#f7a600;font-weight:bold;padding:6px 8px;flex:1}
+  #prl button.auto{padding:6px 8px}
+  #prl button.auto.on{background:#a33;border-color:#c55;color:#fff}
   #prl button:disabled{opacity:.4;cursor:default}
   #prl .row{display:flex;gap:6px;align-items:center}
   #prl .next{background:#262b33;padding:4px 6px;border-left:3px solid #f7a600}
@@ -545,7 +546,8 @@
         <select data-el="route"></select></label>
       <div data-el="msg" class="dim">先选择路线编辑器「导出给游戏」得到的文件。</div>
       <div data-el="next" class="next" hidden></div>
-      <button data-el="go" class="go" hidden>执行下一步</button>
+      <div class="row"><button data-el="go" class="go" hidden>执行下一步</button>
+        <button data-el="auto" class="auto" hidden title="自动一步接一步地做，每秒最多一步；出错或做完会自己停，再点一下也能随时停">自动执行</button></div>
       <ol data-el="list"></ol>`;
     document.body.appendChild(panel);
     els = {};
@@ -588,6 +590,7 @@
     panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); minimize(); } });
     els.route.onchange = () => { state.routeId = els.route.value === NEW ? "" : els.route.value; state.lastKey = ""; say(""); refresh(); };
     els.go.onclick = step;
+    els.auto.onclick = toggleAuto;
   }
 
   /** 最小化只是藏起来：读入的路线和进度都还在；按钮上显示还剩几步 */
@@ -685,7 +688,7 @@
   function refresh() {
     const t = state.target;
     els["target-row"].hidden = !t;
-    els.next.hidden = els.go.hidden = !t;
+    els.next.hidden = els.go.hidden = els.auto.hidden = !t;
     els.list.innerHTML = "";
     if (!t) return;
     let routes;
@@ -704,13 +707,15 @@
     const acts = plan(t, state.routeId ? currentRoute(state.routeId) : null);
     state.plan = acts;
     if (!acts.length) {
-      els.next.hidden = els.go.hidden = true;
+      els.next.hidden = els.go.hidden = els.auto.hidden = true;
       say(`${state.routeId} 已经和文件完全一致。`, "ok");
       return;
     }
     els.next.textContent = `下一步：${acts[0].label}`;
     els.go.textContent = `执行下一步（还剩 ${acts.length} 步）`;
-    els.go.disabled = state.busy;
+    els.go.disabled = state.busy || state.auto;
+    els.auto.textContent = state.auto ? "停止自动" : "自动执行";
+    els.auto.classList.toggle("on", state.auto);
     for (const a of acts.slice(0, 200)) {
       const li = document.createElement("li");
       li.textContent = a.label;
@@ -745,8 +750,29 @@
     } finally {
       state.busy = false;
       refresh();
-      els.go.focus();
+      if (!state.auto) els.go.focus();
     }
+  }
+
+  /**
+   * 自动执行：一步做完、游戏确认了，再做下一步；两步的开始时间至少隔 1 秒。
+   * 任何一步没做成就停下，等人看；做完也停。最小化面板不影响它继续跑。
+   */
+  async function toggleAuto() {
+    if (state.auto) { state.auto = false; refresh(); return; }
+    state.auto = true;
+    refresh();
+    while (state.auto && state.plan && state.plan.length) {
+      const started = Date.now();
+      await step();
+      if (els.msg.className === "err") break;
+      updateToggle();
+      const rest = AUTO_INTERVAL_MS - (Date.now() - started);
+      if (rest > 0) await sleep(rest);
+    }
+    state.auto = false;
+    refresh();
+    updateToggle();
   }
 
   function start() {
