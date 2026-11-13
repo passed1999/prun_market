@@ -10,14 +10,15 @@
  *   tb       = 燃料 × 0.06 / 引擎流量(t/s) / 2，上限 √(D/a)             单侧加速时间
  *   航行时间  = tb + D / (a × tb)
  *   起降时间  ≈ 44.8 × √(d/a)，耗油 ≈ 0.455 × 时间 × 流量 / 0.06
- *   跃迁      速度 = ftlMaxSpeed ×（0.5625 + 0.3R + 0.1375R²），每跳前充能 = 基础 + 档位比例 × 最大超充
+ *   跃迁      最低档 2000 秒/秒差距，100% 时是 ftlMaxSpeed，中间按档位指数插值；每跳前充能 = 基础 + 档位 × 最大超充；
+ *             FTL 耗油 = 0.003 × 用量 × 反应堆功率 × 秒差距
  *
  * 做不到精确的部分（所以界面上一律写「约」）：
  *   - 航段长度 D：行星位置按轨道根数算，和游戏一致（差一个停泊轨道的半径，约几千公里）；
  *     但停泊轨道与跃迁点每次航班随机，空间站的轨道没有公开数据
  *   - 起降的路程 d：随停泊轨道变，实测 2000–9000 km，这里取典型值
  *   - 燃料下限：实测 3–6 个单位，随质量变，规律没找出来，按质量近似（只在用量很低时有影响）
- *   - 跃迁速度曲线只在一艘蓝图上取过样；FTL 耗油不估
+ *   - 进出跃迁点的两段：跃迁点位置每次随机，路程取实测的典型值，这两段的时间和耗油可能差一倍
  *   - 星门：时间是定值加按距离算，准；但走不走星门由游戏选路决定，这里的选路规则是推测的
  */
 
@@ -45,6 +46,8 @@ export interface ShipSpec {
   chargeTime: number;
   overchargeTime: number;
   minReactor: number;
+  /** 反应堆功率，估 FTL 耗油用；0 = 不知道 */
+  reactorPower: number;
 }
 
 const G = 6.67384e-11;
@@ -148,14 +151,29 @@ export function stlBudget(usage: number, aboard: number, reserved: number, mass 
   return Math.ceil(low + usage * (top - low));
 }
 
-export function ftlSpeed(ship: ShipSpec, reactor: number): number {
+/** 反应堆用量在这艘船可用范围里的位置：最低档 = 0，100% = 1 */
+function reactorLevel(ship: ShipSpec, reactor: number): number {
   const r = Math.min(1, Math.max(ship.minReactor, reactor));
-  return ship.ftlMaxSpeed * (0.5625 + 0.3 * r + 0.1375 * r * r);
+  return ship.minReactor < 1 ? (r - ship.minReactor) / (1 - ship.minReactor) : 1;
+}
+
+/**
+ * 跃迁速度（秒差距/秒）。实测两艘船（最低档分别是 28% 和 52.5%）：
+ * 最低档时所有船都是 2000 秒/秒差距，100% 时是船自己的 ftlMaxSpeed，中间按档位做指数插值，
+ * 七个取样点误差都在 0.1 秒/秒差距以内。
+ */
+const FTL_BASE_SPEED = 1 / 2000;
+export function ftlSpeed(ship: ShipSpec, reactor: number): number {
+  return FTL_BASE_SPEED * (ship.ftlMaxSpeed / FTL_BASE_SPEED) ** reactorLevel(ship, reactor);
+}
+/** FTL 耗油：与反应堆实际出力和里程成正比，实测两艘船都是 0.003 × 用量 × 反应堆功率 × 秒差距 */
+export function ftlFuel(ship: ShipSpec, reactor: number, jumps: number[]): number {
+  const r = Math.min(1, Math.max(ship.minReactor, reactor));
+  // 每一跳各自向下取整再相加，这样与游戏逐单位吻合
+  return jumps.reduce((n, pc) => n + Math.floor(0.003 * r * ship.reactorPower * pc), 0);
 }
 export function ftlCharge(ship: ShipSpec, reactor: number): number {
-  const r = Math.min(1, Math.max(ship.minReactor, reactor));
-  const x = ship.minReactor < 1 ? (r - ship.minReactor) / (1 - ship.minReactor) : 0;
-  return ship.chargeTime + x * ship.overchargeTime;
+  return ship.chargeTime + (ship.minReactor < 1 ? reactorLevel(ship, reactor) : 0) * ship.overchargeTime;
 }
 
 // ---- 一整段：从一个 waypoint 到下一个 ----
@@ -219,6 +237,8 @@ export interface LegInput {
 export interface LegEstimate {
   seconds: number;
   stlFuel: number;
+  /** FTL 燃料；不知道反应堆功率时为 0 */
+  ftlFuel: number;
   /** 分项，给悬停提示用 */
   parts: { label: string; seconds: number; fuel: number }[];
   /** 哪些地方是估的 */
@@ -238,7 +258,8 @@ export function estimateLeg(input: LegInput): LegEstimate {
   const { ship, from, to, hops } = input;
   const caveats: string[] = [...(input.routeNotes ?? [])];
   const parts: LegEstimate["parts"] = [];
-  const fail = (unknown: string): LegEstimate => ({ seconds: 0, stlFuel: 0, parts, caveats, unknown });
+  const fail = (unknown: string): LegEstimate => ({ seconds: 0, stlFuel: 0, ftlFuel: 0, parts, caveats, unknown });
+  let ff = 0;
   const mass = ship.emptyMass + input.cargo + input.stlFuel * SF_WEIGHT + input.ftlFuel * FF_WEIGHT;
   const a = ship.thrust / mass;
 
@@ -285,13 +306,11 @@ export function estimateLeg(input: LegInput): LegEstimate {
     const fuel = single ? Math.ceil(share) : Math.ceil(Math.min(share, useful));
     return { ...stlTransit(ship, mass, km, fuel), fuel };
   };
-  const radius = (p: Place) => (p.orbit ? p.orbit.a / 1e3 : p.circular?.radiusKm ?? 1.5e8);
-
   let t = input.departSec;
   const push = (label: string, seconds: number, fuel: number) => { parts.push({ label, seconds, fuel }); t += seconds; };
   if (up) push("起飞", up.time, up.fuel);
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     if (item.t === "known") {
       const start = placePosition(item.a, t);
       if (!start || !placePosition(item.b, t)) return fail("这个空间站的轨道位置没有数据，估不了航程。");
@@ -309,18 +328,24 @@ export function estimateLeg(input: LegInput): LegEstimate {
         : (item.b.id === to.id ? "飞到目的地" : "飞到星门所在的行星");
       push(label, burn.time, burn.fuel);
     } else if (item.t === "out") {
-      // 跃迁点每次随机，只能按轨道半径的量级估
-      const burn = fly(Math.max(1e7, radius(item.from) * 0.3));
+      // 跃迁点每次随机。实测从行星出发 3300–6500 万公里，从空间站出发约 1000 万公里
+      const burn = fly(item.from.isPlanet ? 4.5e7 : 1e7);
       push("飞到跃迁点", burn.time, burn.fuel);
     } else if (item.t === "in") {
-      const burn = fly(Math.max(1e7, radius(item.to) * 0.6));
+      // 实测从跃迁点到行星 6400–7800 万公里
+      const burn = fly(7e7);
       push(item.to.id === to.id ? "从跃迁点飞到目的地" : "从跃迁点飞到星门所在的行星", burn.time, burn.fuel);
     } else if (item.t === "gate") {
+      // 紧接着上一座星门再过一座时，不用再飞进去：少 10 秒、少 15 SF（实测）
+      const chained = index > 0 && items[index - 1].t === "gate";
       push(`过星门 ${item.hop.label}（${item.hop.parsecs.toFixed(1)} 秒差距）`,
-        GATE_FIXED_SECONDS + GATE_SECONDS_PER_PARSEC * item.hop.parsecs, GATE_FUEL);
+        GATE_FIXED_SECONDS - (chained ? 10 : 0) + GATE_SECONDS_PER_PARSEC * item.hop.parsecs, GATE_FUEL - (chained ? 15 : 0));
     } else {
       const total = item.parsecs.reduce((n, d) => n + d, 0);
-      push(`跃迁 ${item.parsecs.length} 跳，共 ${total.toFixed(1)} 秒差距`, total / ftlSpeed(ship, input.reactorUsage), 0);
+      const used = ship.reactorPower ? ftlFuel(ship, input.reactorUsage, item.parsecs) : 0;
+      ff += used;
+      push(`跃迁 ${item.parsecs.length} 跳，共 ${total.toFixed(1)} 秒差距${used ? `，约 ${used} FF` : ""}`,
+        total / ftlSpeed(ship, input.reactorUsage), 0);
       if (item.parsecs.length > 1) {
         push("跳与跳之间充能", ftlCharge(ship, input.reactorUsage) * (item.parsecs.length - 1), 0);
       }
@@ -334,6 +359,7 @@ export function estimateLeg(input: LegInput): LegEstimate {
   return {
     seconds: parts.reduce((n, p) => n + p.seconds, 0),
     stlFuel: parts.reduce((n, p) => n + p.fuel, 0),
+    ftlFuel: ff,
     parts, caveats,
   };
 }

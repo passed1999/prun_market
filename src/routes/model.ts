@@ -73,7 +73,14 @@ export interface RouteDoc {
 export interface ResupplySpec {
   planet: string;
   planetName: string;
+  /** "days" = 补到 days 天；"cargo" = 把给定大小的货舱装满，天数由它反推 */
+  mode?: "days" | "cargo";
   days: number;
+  /** cargo 模式下的货舱大小：载重 t、容积 m³ */
+  cargoWeight?: number;
+  cargoVolume?: number;
+  /** cargo 模式下算出来相当于补到几天 */
+  fitDays?: number;
   includeLuxuries: boolean;
   /** 扣掉基地里已有的库存 */
   deductStock: boolean;

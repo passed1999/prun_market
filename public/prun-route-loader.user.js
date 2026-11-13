@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PrUn Route Loader
 // @namespace    prun-market
-// @version      0.5.0
+// @version      0.6.0
 // @description  把路线编辑器导出的 json 半自动配置到游戏里的 RT（每点一下执行一步）
 // @match        https://apex.prosperousuniverse.com/*
 // @grant        none
@@ -638,6 +638,7 @@
         cargoWeight: cargo.weightCapacity || 0,
         cargoVolume: cargo.volumeCapacity || 0,
         volume: s.volume || 0,
+        reactorPower: s.reactorPower || 0,
         ftlMaxSpeed: perf ? perf.ftlMaxSpeed : 0,
         chargeTime: perf ? perf.emitterChargeTime : 0,
         overchargeTime: perf ? perf.maxOverchargeTime : 0,

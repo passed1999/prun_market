@@ -107,6 +107,8 @@ function lineRates(line: Row, recurring: boolean): [Row, number][] {
 export interface BurnLine { ticker: string; daily: number; stock: number; daysLeft: number | null; need: number }
 
 export interface ResupplyResult {
+  /** 实际按几天算的（cargo 模式下是反推出来的） */
+  days: number;
   materials: Record<string, number>;
   lines: BurnLine[];
   planetName: string;
@@ -163,7 +165,15 @@ export async function baseProducts(planet: string): Promise<Product[]> {
     .sort((a, b) => b.daily - a.daily);
 }
 
-export async function resupply(spec: ResupplySpec, force = true): Promise<ResupplyResult> {
+export type Sizes = Record<string, { weight: number; volume: number }>;
+
+/**
+ * 「补到 N 天」直接按 N 算。
+ * 「装满货舱」：所有材料共用同一个天数 T，带的量 = max(0, ceil(日消耗 × T) − 库存)；
+ * 取装得下（重量和体积都不超）的最大的 T。ceil 让装载量随 T 只增不减，所以二分即可。
+ * 扣库存时这相当于把每种材料都补到同一个剩余天数，已经堆得多的就不带了。
+ */
+export async function resupply(spec: ResupplySpec, sizes: Sizes = {}, force = true): Promise<ResupplyResult> {
   const e = await empire(force);
   const site = e.sites.find((s) => s.PlanetIdentifier === spec.planet);
   if (!site) throw new FioError(`FIO 的数据里没有 ${spec.planetName || spec.planet} 这个基地。`);
@@ -177,16 +187,43 @@ export async function resupply(spec: ResupplySpec, force = true): Promise<Resupp
     stock[item.MaterialTicker] = (stock[item.MaterialTicker] ?? 0) + item.MaterialAmount;
   }
 
+  const burning = Object.entries(daily).filter(([, net]) => net < -1e-9);
+  // 先减一个很小的数再取整：浮点累加出来的 300.0000001 不该变成 301
+  const needAt = (net: number, have: number, days: number) =>
+    Math.max(0, Math.ceil(-net * days - 1e-6) - (spec.deductStock ? have : 0));
+
+  let days = spec.days;
+  if (spec.mode === "cargo") {
+    const maxWeight = spec.cargoWeight ?? 0;
+    const maxVolume = spec.cargoVolume ?? 0;
+    if (!(maxWeight > 0) || !(maxVolume > 0)) throw new FioError("先填货舱的载重和容积。");
+    const unknown = burning.map(([t]) => t).filter((t) => !sizes[t]);
+    if (unknown.length) throw new FioError(`${unknown.join("、")} 的重量体积还没取到，稍后再点一次「更新」。`);
+    const fits = (t: number) => {
+      let weight = 0;
+      let volume = 0;
+      for (const [ticker, net] of burning) {
+        const n = needAt(net, stock[ticker] ?? 0, t);
+        weight += n * sizes[ticker].weight;
+        volume += n * sizes[ticker].volume;
+      }
+      return weight <= maxWeight + 1e-6 && volume <= maxVolume + 1e-6;
+    };
+    let low = 0;
+    let high = 3650;
+    if (fits(high)) low = high;
+    else for (let n = 0; n < 60; n++) { const mid = (low + high) / 2; if (fits(mid)) low = mid; else high = mid; }
+    days = low;
+  }
+
   const materials: Record<string, number> = {};
   const lines: BurnLine[] = [];
-  for (const [ticker, net] of Object.entries(daily)) {
-    if (net > -1e-9) continue;
+  for (const [ticker, net] of burning) {
     const have = stock[ticker] ?? 0;
-    // 先减一个很小的数再取整：浮点累加出来的 300.0000001 不该变成 301
-    const need = Math.max(0, Math.ceil(-net * spec.days - 1e-6) - (spec.deductStock ? have : 0));
+    const need = needAt(net, have, days);
     lines.push({ ticker, daily: net, stock: have, daysLeft: have / -net, need });
     if (need > 0) materials[ticker] = need;
   }
   lines.sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0));
-  return { materials, lines, planetName: String(site.PlanetName ?? spec.planet) };
+  return { days, materials, lines, planetName: String(site.PlanetName ?? spec.planet) };
 }

@@ -73,7 +73,8 @@ watch([ship, result], () => {
 }, { immediate: true, deep: true });
 
 function legText(leg: RouteLeg): string {
-  return leg.unknown ? "估不了" : `约 ${formatDuration(leg.seconds)} · ${leg.stlFuel} SF`;
+  if (leg.unknown) return "估不了";
+  return `约 ${formatDuration(leg.seconds)} · ${leg.stlFuel} SF${leg.ftlFuel ? ` · ${leg.ftlFuel} FF` : ""}`;
 }
 function legTitle(leg: RouteLeg): string {
   if (leg.unknown) return leg.unknown;
@@ -300,7 +301,11 @@ function fioFailed(e: unknown) {
   say(fioText(e), true);
   if (e instanceof FioError && /用户名|API key/.test(e.message)) fioOpen.value = true;
 }
-const autoName = (g: MaterialGroup) => `${g.resupply!.planetName || g.resupply!.planet} 补到 ${g.resupply!.days} 天`;
+const autoName = (g: MaterialGroup) => {
+  const r = g.resupply!;
+  const where = r.planetName || r.planet;
+  return r.mode === "cargo" ? `${where} 装满 ${r.cargoWeight ?? 0}t-${r.cargoVolume ?? 0}m3` : `${where} 补到 ${r.days} 天`;
+};
 
 async function loadBases(force = false): Promise<boolean> {
   busy.value = "bases";
@@ -333,7 +338,9 @@ async function addResupplyGroup() {
   await refreshGroup(g);
 }
 /** 名字还是自动起的那个就跟着参数改，用户自己起过名字就不动 */
-function changeSpec(g: MaterialGroup, patch: { planet?: string; days?: number }) {
+function changeSpec(g: MaterialGroup, patch: {
+  planet?: string; days?: number; mode?: "days" | "cargo"; cargoWeight?: number; cargoVolume?: number;
+}) {
   const r = g.resupply!;
   const was = autoName(g);
   if (patch.planet) {
@@ -341,6 +348,16 @@ function changeSpec(g: MaterialGroup, patch: { planet?: string; days?: number })
     r.planetName = bases.value.find((b) => b.naturalId === patch.planet)?.name ?? "";
   }
   if (patch.days != null) r.days = Math.max(1, Math.round(patch.days) || 1);
+  if (patch.mode) {
+    r.mode = patch.mode;
+    // 切到「装满货舱」时先用当前选的船的货舱大小
+    if (patch.mode === "cargo") {
+      r.cargoWeight ??= workspace.shipWeight || 500;
+      r.cargoVolume ??= workspace.shipVolume || 500;
+    }
+  }
+  if (patch.cargoWeight != null) r.cargoWeight = Math.max(1, patch.cargoWeight || 1);
+  if (patch.cargoVolume != null) r.cargoVolume = Math.max(1, patch.cargoVolume || 1);
   if (!g.name || g.name === was) { g.name = autoName(g); renameGroup(g); }
   refreshGroup(g);
 }
@@ -348,7 +365,8 @@ async function refreshGroup(g: MaterialGroup) {
   if (!g.resupply) return;
   busy.value = g.id;
   try {
-    const got = await resupply(g.resupply);
+    const got = await resupply(g.resupply, materials.value);
+    g.resupply.fitDays = g.resupply.mode === "cargo" ? got.days : undefined;
     g.materials = got.materials;
     g.resupply.planetName = got.planetName;
     g.resupply.updatedAt = Date.now();
@@ -356,7 +374,9 @@ async function refreshGroup(g: MaterialGroup) {
     const kinds = Object.keys(got.materials).length;
     say(kinds
       ? `「${g.name}」已按 FIO 的最新数据更新：${kinds} 种材料。`
-      : `「${g.name}」：${got.planetName} 现有库存已经够 ${g.resupply.days} 天，不用带东西。`);
+      : g.resupply.mode === "cargo"
+        ? `「${g.name}」：这么大的货舱一件也装不下，或者 ${got.planetName} 没有在消耗东西。`
+        : `「${g.name}」：${got.planetName} 现有库存已经够 ${g.resupply.days} 天，不用带东西。`);
   } catch (e) {
     fioFailed(e);
   } finally {
@@ -509,9 +529,24 @@ function importPaste() {
                     </option>
                     <option v-for="b in bases" :key="b.naturalId" :value="b.naturalId">{{ b.name }} ({{ b.naturalId }})</option>
                   </select></label>
-                <label>补到
+                <label>方式
+                  <select :value="g.resupply.mode ?? 'days'"
+                          @change="changeSpec(g, { mode: ($event.target as HTMLSelectElement).value as 'days' | 'cargo' })">
+                    <option value="days">补到指定天数</option>
+                    <option value="cargo">装满指定大小的货舱</option>
+                  </select></label>
+                <label v-if="g.resupply.mode !== 'cargo'">补到
                   <input :value="g.resupply.days" class="days" type="number" min="1" step="1"
                          @change="changeSpec(g, { days: Number(($event.target as HTMLInputElement).value) })" /> 天</label>
+                <template v-else>
+                  <label title="所有材料按同一个天数带，取这个货舱装得下的最大天数">货舱
+                    <input :value="g.resupply.cargoWeight" class="days" type="number" min="1"
+                           @change="changeSpec(g, { cargoWeight: Number(($event.target as HTMLInputElement).value) })" /> t
+                    <input :value="g.resupply.cargoVolume" class="days" type="number" min="1"
+                           @change="changeSpec(g, { cargoVolume: Number(($event.target as HTMLInputElement).value) })" /> m³</label>
+                  <div v-if="g.resupply.fitDays != null" class="dim">
+                    相当于补到 {{ g.resupply.fitDays >= 3650 ? "3650 天以上" : `${g.resupply.fitDays.toFixed(1)} 天` }}</div>
+                </template>
                 <label title="关掉就不带奢侈消费品，工人满足度和效率会下降">
                   <input v-model="g.resupply.includeLuxuries" type="checkbox" @change="refreshGroup(g)" />含奢侈品</label>
                 <label title="勾上：带的量 = 需要的量 − 基地里已有的；不勾：按满量带">
@@ -603,7 +638,7 @@ function importPaste() {
         <span v-for="(i, n) in looseIssues" :key="n" :class="i.level === 'error' ? 'err' : 'warn'">{{ i.text }}</span>
         <span v-if="estimate && route.waypoints.length > 1">
           {{ route.repeats ? "跑一圈" : "全程" }}{{ estimate.totalSeconds == null ? "有的段估不了" : `约 ${formatDuration(estimate.totalSeconds)}` }}，
-          STL 约 {{ estimate.totalFuel }} SF（按现在出发、满油箱起步）。</span>
+          STL 约 {{ estimate.totalFuel }} SF<template v-if="estimate.totalFtlFuel">，FTL 约 {{ estimate.totalFtlFuel }} FF</template>（按现在出发、满油箱起步）。</span>
         <span v-if="stale.length" class="warn">补给组「{{ stale.join("、") }}」是 6 小时以前算的，导出前建议先更新。</span>
         <span v-if="notice" :class="noticeBad ? 'err' : 'ok'">{{ notice }}</span>
       </div>

@@ -168,6 +168,7 @@ export interface RouteEstimate {
   /** 一圈（或一趟）的总时间，含等待步骤；有估不出的段时为 null */
   totalSeconds: number | null;
   totalFuel: number;
+  totalFtlFuel: number;
 }
 
 const WAIT: Record<string, number> = { SECONDS: 1, MINUTES: 60, HOURS: 3600, DAYS: 86400 };
@@ -181,7 +182,7 @@ export async function estimateRoute(
 ): Promise<RouteEstimate> {
   const stops = game.waypoints;
   const n = stops.length;
-  if (n < 2) return { legs: [], totalSeconds: 0, totalFuel: 0 };
+  if (n < 2) return { legs: [], totalSeconds: 0, totalFuel: 0, totalFtlFuel: 0 };
   const where = await Promise.all(stops.map((w) => place(w.destination.naturalId.trim())));
 
   let fuel = ship.stlCapacity;
@@ -212,7 +213,7 @@ export async function estimateRoute(
       const b = where[to];
       let est: LegEstimate;
       if (!a || !b) {
-        est = { seconds: 0, stlFuel: 0, parts: [], caveats: [], unknown: "认不出这一段的起点或终点，估不了。" };
+        est = { seconds: 0, stlFuel: 0, ftlFuel: 0, parts: [], caveats: [], unknown: "认不出这一段的起点或终点，估不了。" };
       } else {
         const stop = stops[to];
         const route = await plan(a.system, b.system, ship, stop.reactorUsageFactor,
@@ -236,5 +237,6 @@ export async function estimateRoute(
       if (total != null) total += wait;
     }
   }
-  return { legs, totalSeconds: total, totalFuel: legs.reduce((s, l) => s + (l.unknown ? 0 : l.stlFuel), 0) };
+  const sum = (pick: (l: RouteLeg) => number) => legs.reduce((s, l) => s + (l.unknown ? 0 : pick(l)), 0);
+  return { legs, totalSeconds: total, totalFuel: sum((l) => l.stlFuel), totalFtlFuel: sum((l) => l.ftlFuel) };
 }

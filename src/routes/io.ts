@@ -47,7 +47,7 @@ export function parseFile(text: string, fileName: string): Imported {
       stlCapacity: num(s.stlCapacity), ftlCapacity: num(s.ftlCapacity),
       cargoWeight: num(s.cargoWeight), cargoVolume: num(s.cargoVolume), volume: num(s.volume),
       ftlMaxSpeed: num(s.ftlMaxSpeed), chargeTime: num(s.chargeTime), overchargeTime: num(s.overchargeTime),
-      minReactor: num(s.minReactor) || 1,
+      minReactor: num(s.minReactor) || 1, reactorPower: num(s.reactorPower),
     })).filter((s) => s.emptyMass > 0 && s.thrust > 0 && s.flowRate > 0);
     if (!ships.length) throw new ImportError(`「${fileName}」里没有可用的船只参数。`);
     const planet = /^[A-Z]{2}-\d{3}[a-z]$/;
@@ -66,6 +66,9 @@ export function parseFile(text: string, fileName: string): Imported {
       g.resupply = {
         planet: String(r.planet), planetName: String(r.planetName ?? ""),
         days: Math.max(1, Number(r.days) || 30),
+        mode: r.mode === "cargo" ? "cargo" : "days",
+        cargoWeight: Number(r.cargoWeight) || undefined, cargoVolume: Number(r.cargoVolume) || undefined,
+        fitDays: Number(r.fitDays) || undefined,
         includeLuxuries: r.includeLuxuries !== false, deductStock: r.deductStock !== false,
         updatedAt: Number(r.updatedAt) || 0,
       };
