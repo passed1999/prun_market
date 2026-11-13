@@ -5,6 +5,7 @@
  *
  * 包的格式与 PMMG-Extended / Refined PrUn 的 XIT ACT 一致：顶层 global / groups / actions 三项必填，
  * CX Buy 的 group 引用 groups 里的 name，exchange 是 AI1 | CI1 | CI2 | IC1 | NC1 | NC2。
+ * 包里出现的名字与说明一律只用英文字母、数字、下划线、连字符（"CX Buy" / "Manual" 是格式规定的关键字）。
  */
 import type { FioStation } from "../api/types";
 import type { GameRoute } from "./model";
@@ -20,6 +21,14 @@ export interface BuyPlan {
   byExchange: { exchange: string; station: string; materials: Record<string, number> }[];
   /** 在空间站「装到满」的材料：没有确切数量，没法写进采购单 */
   open: string[];
+}
+
+/**
+ * 包里所有的名字只用英文字母、数字、下划线和连字符：游戏里的插件遇到别的字符（中文、空格等）会出问题。
+ * 路线名里其余的字符换成下划线，全是中文时退回一个固定的名字。
+ */
+function ascii(text: string): string {
+  return text.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
 }
 
 export function buildBuyPlan(game: GameRoute, stations: FioStation[]): BuyPlan {
@@ -44,11 +53,11 @@ export function buildBuyPlan(game: GameRoute, stations: FioStation[]): BuyPlan {
   if (!byExchange.length) return { pack: null, byExchange, open: [...open] };
   return {
     pack: {
-      global: { name: `采购 ${game.name || "路线"}`.slice(0, 60), description: "由路线编辑器生成：只在交易所采购，不转运" },
-      groups: byExchange.map((e) => ({ type: "Manual", name: `buy ${e.exchange}`, materials: e.materials })),
+      global: { name: `buy_${ascii(game.name) || "route"}`.slice(0, 60), description: "buy_only_no_transfer" },
+      groups: byExchange.map((e) => ({ type: "Manual", name: `buy_${e.exchange}`, materials: e.materials })),
       // useCXInv：站上仓库里已有的先扣掉，只买差额；buyPartial 关：挂单簿不够就停下，不买一半
       actions: byExchange.map((e) => ({
-        type: "CX Buy", name: `在 ${e.exchange} 采购`, group: `buy ${e.exchange}`, exchange: e.exchange,
+        type: "CX Buy", name: `cx_buy_${e.exchange}`, group: `buy_${e.exchange}`, exchange: e.exchange,
         useCXInv: true, buyPartial: false,
       })),
     },
