@@ -240,7 +240,7 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
               <span class="chips"><i v-for="c in digest(step).chips" :key="c">{{ c }}</i>
                 <i v-if="digest(step).more">+{{ digest(step).more }}</i></span>
               <span v-if="digest(step).covered" class="covered"
-                    title="这些是这一站另外写明要装的，或途中别的站会装上来的，已经从这个引用里扣掉，不会装两遍">
+                    title="这一站另外写明要装的会从引用里扣掉；这一站是空间站时，途中别的站会装上来的也会扣掉（不用多买）">
                 已扣掉途中会有的：{{ digest(step).covered }}</span>
             </span>
           </span>

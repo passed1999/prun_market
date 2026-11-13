@@ -66,6 +66,9 @@ export function stepLines(route: RouteDoc, groups: Groups, step: Step, trail: st
   return [];
 }
 
+/** 星球编号的样子；目的地不是这个样子的就是空间站 */
+const PLANET_ID = /^[A-Z]{2}-\d{3}[a-z]$/;
+
 export interface MirrorResult {
   lines: Line[];
   /** 因为途中已经装了而少装的数量；"all" = 途中有「装到满」，这里整种不装 */
@@ -77,7 +80,7 @@ export interface MirrorResult {
  *
  * 「在这里装 X 站要卸的东西」时，要扣掉到 X 之前船上已经会有的那部分，不然同一批货会装两遍：
  *   - 这一站自己另外写明要装的（单种材料、材料组）
- *   - 从这一站到 X 之间的各站装上来的
+ *   - 从这一站到 X 之间的各站装上来的——只在这一站是空间站时才扣（采购 ACT 也因此只买差额）
  *   途中各站卸掉的会先把这些「已有的」消耗掉——那是给它们自己用的，轮不到 X。
  * 只对「装货 ← 卸货内容」这一种引用做扣减；X 排在这一站前面且路线不循环时也不扣（那不是送货）。
  */
@@ -113,9 +116,14 @@ export function mirrorLines(route: RouteDoc, groups: Groups, step: MirrorStep, t
   for (const s of list[here].steps) {
     if ((s.kind === "material" || s.kind === "group") && s.op === "LOAD") apply("LOAD", stepLines(route, groups, s, next));
   }
+  // 途中各站装上来的只在空间站算数：在站上是花钱买货，途中能补上的就不必买；
+  // 在基地装的是自己的库存，照引用的数量装足。途中的卸货两种情况都要算（它消耗的是上面那份）。
+  const atStation = !PLANET_ID.test(list[here].destination.naturalId.trim());
   for (let i = (here + 1) % list.length; i !== there; i = (i + 1) % list.length) {
     for (const s of list[i].steps) {
-      if (s.kind === "material" || s.kind === "group" || s.kind === "mirror") apply(s.op, stepLines(route, groups, s, next));
+      if (s.kind !== "material" && s.kind !== "group" && s.kind !== "mirror") continue;
+      if (s.op === "LOAD" && !atStation) continue;
+      apply(s.op, stepLines(route, groups, s, next));
     }
   }
 
