@@ -18,6 +18,7 @@
  *   - 起降的路程 d：随停泊轨道变，实测 2000–9000 km，这里取典型值
  *   - 燃料下限：实测 3–6 个单位，随质量变，规律没找出来，按质量近似（只在用量很低时有影响）
  *   - 跃迁速度曲线只在一艘蓝图上取过样；FTL 耗油不估
+ *   - 星门：时间是定值加按距离算，准；但走不走星门由游戏选路决定，这里的选路规则是推测的
  */
 
 export interface Vec { x: number; y: number; z: number }
@@ -37,6 +38,8 @@ export interface ShipSpec {
   ftlCapacity: number;
   cargoWeight: number;
   cargoVolume: number;
+  /** 船体体积 m³，过星门有上限；0 = 不知道 */
+  volume: number;
   /** 秒差距 / 秒；0 = 没有 FTL */
   ftlMaxSpeed: number;
   chargeTime: number;
@@ -158,6 +161,8 @@ export function ftlCharge(ship: ShipSpec, reactor: number): number {
 // ---- 一整段：从一个 waypoint 到下一个 ----
 
 export interface Place {
+  /** 星球编号或空间站代码，用来判断是不是同一个地方 */
+  id: string;
   /** 行星有轨道根数；空间站只有个别测过位置的能算 */
   orbit?: Orbit;
   /** 近圆轨道的空间站：半径 km、某一现实时刻的相位 */
@@ -178,6 +183,19 @@ export function placePosition(p: Place, tSec: number): Vec | null {
   return null;
 }
 
+/**
+ * 星系之间的一步。星门（2026-11 取样，三艘蓝图、两座星门）：
+ *   飞进星门 10 秒 + 锁定 600 秒 + 跃迁 1200 秒/秒差距 + 脱离 600 秒 + 飞出 10 秒，共耗 40 SF，
+ *   不耗 FTL 燃料，与船、载重、燃料用量、反应堆用量都无关；星门在行星轨道上，从一颗行星通到另一颗。
+ */
+export type Hop =
+  | { kind: "ftl"; parsecs: number }
+  | { kind: "gate"; parsecs: number; from: Place; to: Place; label: string };
+
+export const GATE_FIXED_SECONDS = 1220;
+export const GATE_SECONDS_PER_PARSEC = 1200;
+const GATE_FUEL = 40;
+
 export interface LegInput {
   ship: ShipSpec;
   from: Place;
@@ -190,10 +208,12 @@ export interface LegInput {
   stlFuel: number;
   ftlFuel: number;
   departSec: number;
-  /** 跨星系时每一跳的长度（秒差距） */
-  jumps: number[];
-  /** 这一段允许走星门（估算不含星门，只用来提醒） */
-  useGateways?: boolean;
+  /** 跨星系时依次要走的每一步；同星系为空 */
+  hops: Hop[];
+  /** 跨星系但没找到路 */
+  noRoute?: boolean;
+  /** 关于选路的提醒（比如船太大过不了某座星门） */
+  routeNotes?: string[];
 }
 
 export interface LegEstimate {
@@ -207,66 +227,110 @@ export interface LegEstimate {
   unknown?: string;
 }
 
+type Item =
+  | { t: "known"; a: Place; b: Place }
+  | { t: "out"; from: Place }
+  | { t: "in"; to: Place }
+  | { t: "gate"; hop: Extract<Hop, { kind: "gate" }> }
+  | { t: "ftl"; parsecs: number[] };
+
 export function estimateLeg(input: LegInput): LegEstimate {
-  const { ship, from, to } = input;
-  const caveats: string[] = [];
+  const { ship, from, to, hops } = input;
+  const caveats: string[] = [...(input.routeNotes ?? [])];
   const parts: LegEstimate["parts"] = [];
+  const fail = (unknown: string): LegEstimate => ({ seconds: 0, stlFuel: 0, parts, caveats, unknown });
   const mass = ship.emptyMass + input.cargo + input.stlFuel * SF_WEIGHT + input.ftlFuel * FF_WEIGHT;
-  const sameSystem = from.system === to.system;
+  const a = ship.thrust / mass;
+
+  if (from.system !== to.system && (input.noRoute || !hops.length)) {
+    return fail(ship.ftlMaxSpeed ? "没查到两个星系之间的路线。" : "这艘船没有 FTL，也没有能用的星门通到那里。");
+  }
+  if (hops.some((h) => h.kind === "ftl") && !ship.ftlMaxSpeed) return fail("这艘船没有 FTL，到不了别的星系。");
+
+  // 把这一段拆成依次要做的事
+  const items: Item[] = [];
+  let here = from;
+  let adrift = false; // 停在跃迁点上
+  for (let i = 0; i < hops.length; i++) {
+    const h = hops[i];
+    if (h.kind === "gate") {
+      if (adrift) { items.push({ t: "in", to: h.from }); adrift = false; }
+      else if (here.id !== h.from.id) items.push({ t: "known", a: here, b: h.from });
+      items.push({ t: "gate", hop: h });
+      here = h.to;
+    } else {
+      const parsecs = [h.parsecs];
+      while (hops[i + 1]?.kind === "ftl") parsecs.push(hops[++i].parsecs);
+      if (!adrift) items.push({ t: "out", from: here });
+      items.push({ t: "ftl", parsecs });
+      adrift = true;
+    }
+  }
+  if (adrift) items.push({ t: "in", to });
+  else if (here.id !== to.id) items.push({ t: "known", a: here, b: to });
 
   const up = from.isPlanet ? landing(ship, mass) : null;
   const down = to.isPlanet ? landing(ship, mass) : null;
   if (up || down) caveats.push("起降按典型路程估，实际随停泊轨道变化（单次可差一两分钟）");
-  const reserved = (up?.fuel ?? 0) + (down?.fuel ?? 0);
+  const gates = items.filter((x) => x.t === "gate").length;
+  const reserved = (up?.fuel ?? 0) + (down?.fuel ?? 0) + gates * GATE_FUEL;
+  if (input.stlFuel < reserved + 1) return fail("按估算，船上的 STL 燃料不够这一段的起降和过星门。");
   const budget = stlBudget(input.fuelUsage, input.stlFuel, reserved, mass);
-  if (input.stlFuel < reserved + 1) {
-    return { seconds: 0, stlFuel: 0, parts, caveats, unknown: "按估算，船上的 STL 燃料不够起降。" };
-  }
-  let t = input.departSec;
-  if (up) { parts.push({ label: "起飞", seconds: up.time, fuel: up.fuel }); t += up.time; }
+  const flights = items.filter((x) => x.t === "known" || x.t === "out" || x.t === "in").length;
+  const share = flights ? budget / flights : 0;
+  const single = items.length === 1;
+  // 实测：分成几段飞时，每段最多烧到全程加减速为止，不会多烧；只有一段时给多少烧多少
+  const fly = (km: number) => {
+    const useful = (2 * Math.sqrt(km / a) * ship.flowRate) / SF_WEIGHT;
+    const fuel = single ? Math.ceil(share) : Math.ceil(Math.min(share, useful));
+    return { ...stlTransit(ship, mass, km, fuel), fuel };
+  };
+  const radius = (p: Place) => (p.orbit ? p.orbit.a / 1e3 : p.circular?.radiusKm ?? 1.5e8);
 
-  if (sameSystem) {
-    const start = placePosition(from, t);
-    if (!start || !placePosition(to, t)) {
-      return { seconds: 0, stlFuel: 0, parts, caveats, unknown: "这个空间站的轨道位置没有数据，估不了航程。" };
+  let t = input.departSec;
+  const push = (label: string, seconds: number, fuel: number) => { parts.push({ label, seconds, fuel }); t += seconds; };
+  if (up) push("起飞", up.time, up.fuel);
+
+  for (const item of items) {
+    if (item.t === "known") {
+      const start = placePosition(item.a, t);
+      if (!start || !placePosition(item.b, t)) return fail("这个空间站的轨道位置没有数据，估不了航程。");
+      if (!item.a.orbit || !item.b.orbit) caveats.push("空间站的位置按近圆轨道推算，有偏差");
+      // 飞得越久目标走得越远：迭代到到达时刻自洽
+      let burn = fly(transferDistance(start, placePosition(item.b, t)!));
+      for (let n = 0; n < 12; n++) {
+        const next = fly(transferDistance(start, placePosition(item.b, t + burn.time)!));
+        const done = Math.abs(next.time - burn.time) < 1;
+        burn = next;
+        if (done) break;
+      }
+      const label = single
+        ? (burn.capped ? "航行（全程加减速，再多给油也不会更快）" : "航行")
+        : (item.b.id === to.id ? "飞到目的地" : "飞到星门所在的行星");
+      push(label, burn.time, burn.fuel);
+    } else if (item.t === "out") {
+      // 跃迁点每次随机，只能按轨道半径的量级估
+      const burn = fly(Math.max(1e7, radius(item.from) * 0.3));
+      push("飞到跃迁点", burn.time, burn.fuel);
+    } else if (item.t === "in") {
+      const burn = fly(Math.max(1e7, radius(item.to) * 0.6));
+      push(item.to.id === to.id ? "从跃迁点飞到目的地" : "从跃迁点飞到星门所在的行星", burn.time, burn.fuel);
+    } else if (item.t === "gate") {
+      push(`过星门 ${item.hop.label}（${item.hop.parsecs.toFixed(1)} 秒差距）`,
+        GATE_FIXED_SECONDS + GATE_SECONDS_PER_PARSEC * item.hop.parsecs, GATE_FUEL);
+    } else {
+      const total = item.parsecs.reduce((n, d) => n + d, 0);
+      push(`跃迁 ${item.parsecs.length} 跳，共 ${total.toFixed(1)} 秒差距`, total / ftlSpeed(ship, input.reactorUsage), 0);
+      if (item.parsecs.length > 1) {
+        push("跳与跳之间充能", ftlCharge(ship, input.reactorUsage) * (item.parsecs.length - 1), 0);
+      }
     }
-    if (!from.orbit || !to.orbit) caveats.push("空间站的位置按近圆轨道推算，有偏差");
-    // 飞得越久目标走得越远：迭代到到达时刻自洽
-    let burn = stlTransit(ship, mass, transferDistance(start, placePosition(to, t)!), budget);
-    for (let n = 0; n < 12; n++) {
-      const next = stlTransit(ship, mass, transferDistance(start, placePosition(to, t + burn.time)!), budget);
-      const done = Math.abs(next.time - burn.time) < 1;
-      burn = next;
-      if (done) break;
-    }
-    parts.push({ label: burn.capped ? "航行（全程加减速，再多给油也不会更快）" : "航行", seconds: burn.time, fuel: budget });
-  } else {
-    if (!ship.ftlMaxSpeed) return { seconds: 0, stlFuel: 0, parts, caveats, unknown: "这艘船没有 FTL，到不了别的星系。" };
-    if (!input.jumps.length) return { seconds: 0, stlFuel: 0, parts, caveats, unknown: "没查到两个星系之间的跃迁路线。" };
-    // 出发星系飞到跃迁点、到达星系从跃迁点飞到目的地：跃迁点每次随机，只能按轨道半径量级估
-    const radius = (p: Place) => (p.orbit ? p.orbit.a / 1e3 : p.circular?.radiusKm ?? 1.5e8);
-    // 两段各拿一半预算；实测这两段不会多烧：最多烧到全程加减速为止
-    const half = budget / 2;
-    const leg = (km: number) => {
-      const useful = (2 * Math.sqrt(km / (ship.thrust / mass)) * ship.flowRate) / SF_WEIGHT;
-      const fuel = Math.ceil(Math.min(half, useful));
-      return { ...stlTransit(ship, mass, km, fuel), fuel };
-    };
-    const out = leg(Math.max(1e7, radius(from) * 0.3));
-    const inn = leg(Math.max(1e7, radius(to) * 0.6));
-    caveats.push("跃迁点的位置每次随机，星系内进出跃迁点的两段只是量级估计");
-    if (input.useGateways) caveats.push("没有算星门：路线上有星门捷径的话，实际会比这里快很多");
-    parts.push({ label: "飞到跃迁点", seconds: out.time, fuel: out.fuel });
-    const speed = ftlSpeed(ship, input.reactorUsage);
-    const charge = ftlCharge(ship, input.reactorUsage);
-    const parsecs = input.jumps.reduce((n, d) => n + d, 0);
-    parts.push({ label: `跃迁 ${input.jumps.length} 跳，共 ${parsecs.toFixed(1)} 秒差距`, seconds: parsecs / speed, fuel: 0 });
-    if (input.jumps.length > 1) {
-      parts.push({ label: "跳与跳之间充能", seconds: charge * (input.jumps.length - 1), fuel: 0 });
-    }
-    parts.push({ label: "从跃迁点飞到目的地", seconds: inn.time, fuel: inn.fuel });
   }
-  if (down) parts.push({ label: "降落", seconds: down.time, fuel: down.fuel });
+  if (items.some((x) => x.t === "out" || x.t === "in")) {
+    caveats.push("跃迁点的位置每次随机，星系内进出跃迁点的那几段只是量级估计");
+  }
+  if (gates) caveats.push("过星门要付使用费，这里没算；星门每天能过的船数有上限");
+  if (down) push("降落", down.time, down.fuel);
   return {
     seconds: parts.reduce((n, p) => n + p.seconds, 0),
     stlFuel: parts.reduce((n, p) => n + p.fuel, 0),

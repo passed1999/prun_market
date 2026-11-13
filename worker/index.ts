@@ -38,6 +38,7 @@ const SOURCES: Record<string, Source> = {
       [/^\/planet\/allplanets$/, STATIC],
       [/^\/exchange\/station$/, STATIC],
       [/^\/planet\/[A-Z]{2}-\d{3}[a-z]$/, STATIC],
+      [/^\/systemstars$/, STATIC],
       [/^\/systemstars\/star\/[A-Z]{2}-\d{3}$/, STATIC],
       [/^\/systemstars\/jumproute\/[A-Z]{2}-\d{3}\/[A-Z]{2}-\d{3}$/, STATIC],
       [/^\/exchange\/all$/, PRICES],

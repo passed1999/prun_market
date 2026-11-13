@@ -2,11 +2,12 @@
 import type { Amount, GameRoute, MaterialGroup, RouteDoc, Step, Waypoint } from "./model";
 import { abs, cap, newGroup, newId, newWaypoint } from "./model";
 import type { ShipSpec } from "./flight";
+import type { GatewayLink } from "./gateways";
 
 export class ImportError extends Error {}
 
 export type Imported =
-  | { kind: "ships"; ships: ShipSpec[] }
+  | { kind: "ships"; ships: ShipSpec[]; gateways: GatewayLink[] }
   | { kind: "route"; route: RouteDoc }
   | { kind: "groups"; groups: MaterialGroup[]; skipped: string[] };
 
@@ -44,12 +45,16 @@ export function parseFile(text: string, fileName: string): Imported {
       name: String(s.name ?? "未命名"),
       emptyMass: num(s.emptyMass), thrust: num(s.thrust), flowRate: num(s.flowRate),
       stlCapacity: num(s.stlCapacity), ftlCapacity: num(s.ftlCapacity),
-      cargoWeight: num(s.cargoWeight), cargoVolume: num(s.cargoVolume),
+      cargoWeight: num(s.cargoWeight), cargoVolume: num(s.cargoVolume), volume: num(s.volume),
       ftlMaxSpeed: num(s.ftlMaxSpeed), chargeTime: num(s.chargeTime), overchargeTime: num(s.overchargeTime),
       minReactor: num(s.minReactor) || 1,
     })).filter((s) => s.emptyMass > 0 && s.thrust > 0 && s.flowRate > 0);
     if (!ships.length) throw new ImportError(`「${fileName}」里没有可用的船只参数。`);
-    return { kind: "ships", ships };
+    const planet = /^[A-Z]{2}-\d{3}[a-z]$/;
+    const gateways = (Array.isArray(data.gateways) ? data.gateways : []).filter(isObj)
+      .map((g): GatewayLink => ({ from: String(g.from ?? ""), to: String(g.to ?? ""), maxVolume: num(g.maxVolume) }))
+      .filter((g) => planet.test(g.from) && planet.test(g.to));
+    return { kind: "ships", ships, gateways };
   }
   if (data.format === "prun-route") return { kind: "route", route: normalizeRoute(data) };
   if (data.format === "prun-route-game") return { kind: "route", route: fromGame(data as unknown as GameRoute) };

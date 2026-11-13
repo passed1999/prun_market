@@ -8,6 +8,7 @@ import { clearDrag, drag } from "../routes/drag";
 import type { RouteEstimate, RouteLeg } from "../routes/estimate";
 import { estimateRoute } from "../routes/estimate";
 import { formatDuration } from "../routes/flight";
+import { GATEWAY_SNAPSHOT } from "../routes/gateways";
 import type { Base } from "../routes/fio";
 import { account, baseProducts, FioError, listBases, resupply } from "../routes/fio";
 import { buildBuyPlan } from "../routes/act";
@@ -62,7 +63,8 @@ watch([ship, result], () => {
   const cargo = result.value.legs.map((l) => l.weight);
   estimateTimer = setTimeout(async () => {
     try {
-      const got = await estimateRoute(game, cargo, chosen, Date.now() / 1000);
+      const links = workspace.gateways.length ? workspace.gateways : GATEWAY_SNAPSHOT;
+      const got = await estimateRoute(game, cargo, chosen, Date.now() / 1000, links);
       if (run === estimateRun) estimate.value = got;
     } catch {
       if (run === estimateRun) estimate.value = null;
@@ -421,6 +423,11 @@ function take(sources: { name: string; text: string }[]) {
         }
         if (!ship.value) pickShip(got.ships[0].name);
         done.push(`${got.ships.length} 艘船的参数`);
+        if (got.gateways.length) {
+          workspace.gateways = got.gateways;
+          workspace.gatewaysAt = Date.now();
+          done.push(`${got.gateways.length} 条星门连接`);
+        }
       } else if (got.kind === "route") {
         upsertRoute(got.route);
         done.push(`路线「${got.route.name}」`);

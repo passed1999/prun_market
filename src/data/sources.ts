@@ -8,7 +8,8 @@
  */
 import { getJson } from "../api/client";
 import type {
-  FioBuilding, FioExchangeFullRow, FioExchangeRow, FioMaterial, FioPlanetName, FioPlanetOrbit, FioRecipe, FioStation,
+  FioBuilding, FioExchangeFullRow, FioExchangeRow, FioMaterial, FioPlanetName, FioPlanetOrbit, FioRecipe,
+  FioSystemStar, FioStation,
   FioWorkforceNeeds,
   PpExchangeRow, StatsCompanies, StatsKnownCompanies, StatsProduction, StatsUniverse,
 } from "../api/types";
@@ -62,7 +63,7 @@ export const fio = {
   stations: () => cached<FioStation[]>("/api/fio/exchange/station"),
   planet: (id: string) => cached<FioPlanetOrbit>(`/api/fio/planet/${id}`),
   star: (system: string) => cached<{ Mass: number }>(`/api/fio/systemstars/star/${system}`),
-  jumpRoute: (a: string, b: string) => cached<{ Distance: number }[]>(`/api/fio/systemstars/jumproute/${a}/${b}`),
+  systemStars: () => cached<FioSystemStar[]>("/api/fio/systemstars"),
   exchangeAll: (force = false) => cached<FioExchangeRow[]>("/api/fio/exchange/all", force),
   exchangeFull: (force = false) => cached<SlimExchangeRow[]>("/api/fio/exchange/full", force, slimFull),
 };

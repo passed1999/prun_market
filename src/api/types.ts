@@ -187,6 +187,15 @@ export interface FioPlanetOrbit {
   OrbitPeriapsis: number;
 }
 
+export interface FioSystemStar {
+  SystemId: string;
+  NaturalId: string;
+  PositionX: number;
+  PositionY: number;
+  PositionZ: number;
+  Connections: { ConnectingId: string }[];
+}
+
 export interface FioStation {
   NaturalId: string;
   Name: string;

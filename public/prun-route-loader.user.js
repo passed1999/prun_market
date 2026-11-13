@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PrUn Route Loader
 // @namespace    prun-market
-// @version      0.3.0
+// @version      0.4.0
 // @description  把路线编辑器导出的 json 半自动配置到游戏里的 RT（每点一下执行一步）
 // @match        https://apex.prosperousuniverse.com/*
 // @grant        none
@@ -634,17 +634,29 @@
         ftlCapacity: Math.round((ftl.weightCapacity || 0) / 0.05),
         cargoWeight: cargo.weightCapacity || 0,
         cargoVolume: cargo.volumeCapacity || 0,
+        volume: s.volume || 0,
         ftlMaxSpeed: perf ? perf.ftlMaxSpeed : 0,
         chargeTime: perf ? perf.emitterChargeTime : 0,
         overchargeTime: perf ? perf.maxOverchargeTime : 0,
         minReactor: perf ? perf.minReactorUsage : 1,
       };
     });
-    return { json: { format: "prun-ships", version: 1, ships: list }, missingFtl };
+    // 星门清单：只有在游戏里打开过 GTW 才有。已连通的单向连接，带能过的最大船体积
+    const gws = st.getIn(["data", "items", "gateways"]);
+    const all = gws ? gws.toJS() : {};
+    const planetOf = (g) => {
+      const line = g && g.address && g.address.lines.find((l) => l.type === "PLANET");
+      return line && line.entity ? line.entity.naturalId : "";
+    };
+    const gateways = Object.values(all)
+      .filter((g) => g.linkStatus === "ESTABLISHED" && g.outgoingLink && all[g.outgoingLink])
+      .map((g) => ({ from: planetOf(g), to: planetOf(all[g.outgoingLink]), maxVolume: g.maxShipVolume || 0 }))
+      .filter((g) => g.from && g.to);
+    return { json: { format: "prun-ships", version: 1, ships: list, gateways }, missingFtl, gateways: gateways.length };
   }
   async function copyShips() {
     try {
-      const { json, missingFtl } = collectShips();
+      const { json, missingFtl, gateways } = collectShips();
       if (!json.ships.length) { say("游戏里还没读到你的船，先打开一次 FLT。", "err"); return; }
       const text = JSON.stringify(json, null, 2);
       try {
@@ -656,7 +668,7 @@
         say("浏览器不让写剪贴板：参数已放进下面的文本框，请手动复制。", "err");
         return;
       }
-      say(`已复制 ${json.ships.length} 艘船的参数，到路线编辑器里「粘贴导入」。`
+      say(`已复制 ${json.ships.length} 艘船的参数${gateways ? `和 ${gateways} 条星门连接` : "（没带星门清单：想更新星门就先打开一次 GTW）"}，到路线编辑器里「粘贴导入」。`
         + (missingFtl ? `其中 ${missingFtl} 艘没带上 FTL 参数：先在游戏里打开一次 BLU 再复制。` : ""), missingFtl ? "err" : "ok");
     } catch (e) {
       say(e instanceof StepError ? e.message : "读船只参数时出错了。", "err");

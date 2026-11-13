@@ -7,6 +7,7 @@ import { reactive, watch } from "vue";
 import type { MaterialGroup, RouteDoc } from "./model";
 import { newRoute } from "./model";
 import type { ShipSpec } from "./flight";
+import type { GatewayLink } from "./gateways";
 
 const KEY = "prun-market.routes.workspace";
 
@@ -20,12 +21,15 @@ interface Workspace {
   /** 从游戏里复制来的船只参数；shipName 是当前用来估时间的那艘 */
   ships: ShipSpec[];
   shipName: string;
+  /** 从游戏里导出的星门清单；空 = 用内置的那份快照 */
+  gateways: GatewayLink[];
+  gatewaysAt: number;
 }
 
 function load(): Workspace {
   const empty: Workspace = {
     routes: [], groups: [], activeRouteId: "", shipWeight: null, shipVolume: null, mergeAdjacent: false,
-    ships: [], shipName: "",
+    ships: [], shipName: "", gateways: [], gatewaysAt: 0,
   };
   try {
     const raw = localStorage.getItem(KEY);
