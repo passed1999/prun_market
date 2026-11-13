@@ -172,6 +172,29 @@ export interface FioMaterial {
   Volume: number;
 }
 
+export interface FioPlanetName {
+  PlanetNaturalId: string;
+  PlanetName: string;
+}
+
+export interface FioPlanetOrbit {
+  PlanetNaturalId: string;
+  Mass: number;
+  OrbitSemiMajorAxis: number;
+  OrbitEccentricity: number;
+  OrbitInclination: number;
+  OrbitRightAscension: number;
+  OrbitPeriapsis: number;
+}
+
+export interface FioStation {
+  NaturalId: string;
+  Name: string;
+  SystemNaturalId: string;
+  SystemName: string;
+  ComexCode: string;
+}
+
 export interface FioBuilding {
   Ticker: string;
   AreaCost: number;

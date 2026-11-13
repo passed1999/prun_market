@@ -8,7 +8,8 @@
  */
 import { getJson } from "../api/client";
 import type {
-  FioBuilding, FioExchangeFullRow, FioExchangeRow, FioMaterial, FioRecipe, FioWorkforceNeeds,
+  FioBuilding, FioExchangeFullRow, FioExchangeRow, FioMaterial, FioPlanetName, FioPlanetOrbit, FioRecipe, FioStation,
+  FioWorkforceNeeds,
   PpExchangeRow, StatsCompanies, StatsKnownCompanies, StatsProduction, StatsUniverse,
 } from "../api/types";
 
@@ -57,6 +58,11 @@ export const fio = {
   buildings: () => cached<FioBuilding[]>("/api/fio/building/allbuildings"),
   recipes: () => cached<FioRecipe[]>("/api/fio/recipes/allrecipes"),
   workforceNeeds: () => cached<FioWorkforceNeeds[]>("/api/fio/global/workforceneeds"),
+  planets: () => cached<FioPlanetName[]>("/api/fio/planet/allplanets"),
+  stations: () => cached<FioStation[]>("/api/fio/exchange/station"),
+  planet: (id: string) => cached<FioPlanetOrbit>(`/api/fio/planet/${id}`),
+  star: (system: string) => cached<{ Mass: number }>(`/api/fio/systemstars/star/${system}`),
+  jumpRoute: (a: string, b: string) => cached<{ Distance: number }[]>(`/api/fio/systemstars/jumproute/${a}/${b}`),
   exchangeAll: (force = false) => cached<FioExchangeRow[]>("/api/fio/exchange/all", force),
   exchangeFull: (force = false) => cached<SlimExchangeRow[]>("/api/fio/exchange/full", force, slimFull),
 };
