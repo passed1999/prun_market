@@ -148,6 +148,12 @@ export function newStep(kind: StepKind, op: Op = "LOAD"): Step {
   }
 }
 
+/** 燃料 / 反应堆用量：游戏里是 1 到 100 的整数，不能更低；空着或不是数字时用默认值 */
+export function clampPercent(v: unknown, fallback: number): number {
+  const n = Math.round(Number(v));
+  return v === "" || v == null || !Number.isFinite(n) ? fallback : Math.min(100, Math.max(1, n));
+}
+
 export function newWaypoint(x = 40, y = 40): Waypoint {
   return {
     id: newId(), destination: { naturalId: "", name: "" },

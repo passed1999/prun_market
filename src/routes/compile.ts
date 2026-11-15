@@ -14,7 +14,7 @@
 import type {
   Amount, GameRoute, GameStep, GameWaypoint, MaterialGroup, MirrorStep, Op, RouteDoc, Step, Waypoint,
 } from "./model";
-import { abs, destinationLabel } from "./model";
+import { abs, clampPercent, destinationLabel } from "./model";
 
 export interface Line { ticker: string; min: Amount; max: Amount; retain: number }
 
@@ -296,8 +296,8 @@ export function compile(route: RouteDoc, groupList: MaterialGroup[], opts: Compi
     }
     waypoints.push({
       destination: { naturalId: wp.destination.naturalId.trim(), name: wp.destination.name.trim() },
-      fuelUsageFactor: wp.fuelUsage / 100,
-      reactorUsageFactor: wp.reactorUsage / 100,
+      fuelUsageFactor: clampPercent(wp.fuelUsage, 25) / 100,
+      reactorUsageFactor: clampPercent(wp.reactorUsage, 50) / 100,
       preferences: { ftlPreference: wp.ftlPreference, useGateways: wp.useGateways },
       steps: opts.mergeAdjacent ? mergeAdjacent(steps) : steps,
     });

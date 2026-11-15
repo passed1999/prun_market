@@ -11,7 +11,7 @@
  *   航行时间  = tb + D / (a × tb)
  *   起降时间  ≈ 44.8 × √(d/a)，耗油 ≈ 0.455 × 时间 × 流量 / 0.06
  *   跃迁      最低档 2000 秒/秒差距，100% 时是 ftlMaxSpeed，中间按档位指数插值；每跳前充能 = 基础 + 档位 × 最大超充；
- *             FTL 耗油 = 0.003 × 用量 × 反应堆功率 × 秒差距
+ *             FTL 耗油 = 0.003005 × 用量 × 反应堆功率 × 秒差距，逐跳向下取整
  *
  * 做不到精确的部分（所以界面上一律写「约」）：
  *   - 航段长度 D：行星位置按轨道根数算，和游戏一致（差一个停泊轨道的半径，约几千公里）；
@@ -166,11 +166,15 @@ const FTL_BASE_SPEED = 1 / 2000;
 export function ftlSpeed(ship: ShipSpec, reactor: number): number {
   return FTL_BASE_SPEED * (ship.ftlMaxSpeed / FTL_BASE_SPEED) ** reactorLevel(ship, reactor);
 }
-/** FTL 耗油：与反应堆实际出力和里程成正比，实测两艘船都是 0.003 × 用量 × 反应堆功率 × 秒差距 */
+/**
+ * FTL 耗油：与反应堆实际出力和里程成正比，每一跳各自向下取整（游戏在出发和每次充能时各扣一跳的量）。
+ * 系数最初按两艘船取成 0.003；2026-11-15 拿五艘船正在飞的 18 跳核对，0.003 有 2 跳少算 1 个，
+ * 18 跳全部吻合要求系数落在 0.0030018–0.0030079 之间，取 0.003005。真实的取整规则不清楚，可能还会差 1。
+ */
+const FTL_FUEL_FACTOR = 0.003005;
 export function ftlFuel(ship: ShipSpec, reactor: number, jumps: number[]): number {
   const r = Math.min(1, Math.max(ship.minReactor, reactor));
-  // 每一跳各自向下取整再相加，这样与游戏逐单位吻合
-  return jumps.reduce((n, pc) => n + Math.floor(0.003 * r * ship.reactorPower * pc), 0);
+  return jumps.reduce((n, pc) => n + Math.floor(FTL_FUEL_FACTOR * r * ship.reactorPower * pc), 0);
 }
 export function ftlCharge(ship: ShipSpec, reactor: number): number {
   return ship.chargeTime + (ship.minReactor < 1 ? reactorLevel(ship, reactor) : 0) * ship.overchargeTime;

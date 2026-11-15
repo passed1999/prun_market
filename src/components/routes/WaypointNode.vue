@@ -5,7 +5,7 @@ import type { Issue, LegLoad, MaterialInfo } from "../../routes/compile";
 import { mirrorLines, stepLines, summarize } from "../../routes/compile";
 import { clearDrag, drag } from "../../routes/drag";
 import type { MaterialGroup, Op, RouteDoc, Step, StepKind, Waypoint } from "../../routes/model";
-import { destinationLabel, newStep } from "../../routes/model";
+import { clampPercent, destinationLabel, newStep } from "../../routes/model";
 import AmountInput from "./AmountInput.vue";
 import LocationInput from "./LocationInput.vue";
 
@@ -170,9 +170,11 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
 
     <div class="flight">
       <label title="飞到这里时的 STL 燃料用量，越低越省油、越慢">燃料
-        <input v-model.number="wp.fuelUsage" type="number" min="1" max="100" step="1" />%</label>
+        <input v-model.number="wp.fuelUsage" type="number" min="1" max="100" step="1"
+               @change="wp.fuelUsage = clampPercent(wp.fuelUsage, 25)" />%</label>
       <label title="飞到这里时的 FTL 反应堆用量">反应堆
-        <input v-model.number="wp.reactorUsage" type="number" min="1" max="100" step="1" />%</label>
+        <input v-model.number="wp.reactorUsage" type="number" min="1" max="100" step="1"
+               @change="wp.reactorUsage = clampPercent(wp.reactorUsage, 50)" />%</label>
       <select v-model="wp.ftlPreference" title="跨星系时怎么选路">
         <option value="LEAST_JUMPS">最少跳数</option>
         <option value="SHORTEST_FTL">最短 FTL</option>
