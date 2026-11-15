@@ -280,7 +280,11 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
     <p v-if="auto.load" class="auto">自动：最后装上要送往后面的运单</p>
 
     <footer v-if="leg && (leg.weight || leg.volume)">
-      离站时船上 {{ leg.weight.toFixed(1) }} t · {{ leg.volume.toFixed(1) }} m³<template v-if="!leg.exact">（不含「装满」的材料）</template>
+      离站时船上 {{ leg.weight.toFixed(1) }} t · {{ leg.volume.toFixed(1) }} m³<span
+        v-if="Object.keys(leg.filled).length"
+        title="「装满」的步骤按 FIO 里这里现在的库存估：能装的 = 库存 − 保留量，再受货舱剩余的载重和容积限制（要先填货舱大小）。船到的时候库存会变，只是个参考"
+      >（「装满」按 FIO 库存估：{{ Object.entries(leg.filled).map(([t, n]) => `${t} ${n}`).join("、") }}）</span><template
+        v-if="!leg.exact">（不含「装满」的 {{ leg.open.join("、") }}）</template>
     </footer>
    </div>
    <div class="side">

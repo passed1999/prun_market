@@ -10,7 +10,8 @@ import { estimateRoute } from "../routes/estimate";
 import { formatDuration } from "../routes/flight";
 import { GATEWAY_SNAPSHOT } from "../routes/gateways";
 import type { Base } from "../routes/fio";
-import { account, baseProducts, FioError, listBases, resupply } from "../routes/fio";
+import type { Stocks } from "../routes/fio";
+import { account, baseProducts, FioError, listBases, localStocks, resupply } from "../routes/fio";
 import { buildBuyPlan } from "../routes/act";
 import { fio } from "../data/sources";
 import { copyText, download, ImportError, parseFile, safeName, toText } from "../routes/io";
@@ -21,6 +22,7 @@ import { relinkGroups, upsertGroup, upsertRoute, workspace } from "../routes/sto
 const { materials } = useCatalog();
 const tickers = computed(() => Object.keys(materials.value).sort());
 
+const stocks = ref<Stocks>({});
 const route = computed<RouteDoc>(() =>
   workspace.routes.find((r) => r.id === workspace.activeRouteId) ?? workspace.routes[0]);
 
@@ -29,7 +31,17 @@ const result = computed(() => compile(route.value, workspace.groups, {
   shipWeight: workspace.shipWeight,
   shipVolume: workspace.shipVolume,
   materials: materials.value,
+  stock: stocks.value,
 }));
+
+// ---- 「装满」的步骤装多少：填了 FIO 账号就按当地现在的库存估 ----
+const wantsStocks = computed(() => !!account.username && !!account.apiKey && result.value.game.waypoints
+  .some((w) => w.steps.some((s) => s.type === "LOAD" && s.maximum.type === "CAPACITY")));
+async function loadStocks() {
+  if (!wantsStocks.value) return;
+  try { stocks.value = await localStocks(); } catch { /* 取不到就照旧不估 */ }
+}
+watch(wantsStocks, loadStocks, { immediate: true });
 const errors = computed(() => result.value.issues.filter((i) => i.level === "error"));
 const stepCount = computed(() => result.value.game.waypoints.reduce((n, w) => n + w.steps.length, 0));
 const issuesFor = (wp: Waypoint) => result.value.issues.filter((i) => i.waypointId === wp.id);
@@ -54,17 +66,23 @@ function pickShip(name: string) {
   const chosen = workspace.ships.find((x) => x.name === name);
   if (chosen) { workspace.shipWeight = chosen.cargoWeight; workspace.shipVolume = chosen.cargoVolume; }
 }
-watch([ship, result], () => {
+/** 输入框清空时 v-model.number 给的是空串：当作没填 = 满油箱 */
+const startFuel = computed(() => {
+  const v = workspace.startFuel as number | string | null;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+});
+watch([ship, result, startFuel, () => workspace.fuelCarry], () => {
   clearTimeout(estimateTimer);
   const run = ++estimateRun;
   if (!ship.value) { estimate.value = null; return; }
   const chosen = ship.value;
+  const fuel = { start: startFuel.value, carry: workspace.fuelCarry };
   const game = result.value.game;
   const cargo = result.value.legs.map((l) => l.weight);
   estimateTimer = setTimeout(async () => {
     try {
       const links = workspace.gateways.length ? workspace.gateways : GATEWAY_SNAPSHOT;
-      const got = await estimateRoute(game, cargo, chosen, Date.now() / 1000, links);
+      const got = await estimateRoute(game, cargo, chosen, Date.now() / 1000, links, fuel);
       if (run === estimateRun) estimate.value = got;
     } catch {
       if (run === estimateRun) estimate.value = null;
@@ -316,6 +334,7 @@ async function loadBases(force = false): Promise<boolean> {
       return false;
     }
     if (force) say(`已读到 ${bases.value.length} 个基地。`);
+    void loadStocks();
     fioOpen.value = false;
     return true;
   } catch (e) {
@@ -617,6 +636,13 @@ function importPaste() {
             <option value="">{{ workspace.ships.length ? "不估时间" : "还没导入船" }}</option>
             <option v-for="sh in workspace.ships" :key="sh.name" :value="sh.name">{{ sh.name }}</option>
           </select></label>
+        <template v-if="ship">
+          <label :title="`估算时启航的 STL 燃料。留空 = 满油箱（${ship.stlCapacity} SF）。燃料用量是船上现有燃料的百分比，所以油少了每段烧得也少、飞得也慢`">启航燃油
+            <input v-model.number="workspace.startFuel" class="cap" type="number" min="0" :max="ship.stlCapacity"
+                   :placeholder="String(ship.stlCapacity)" /> SF</label>
+          <label title="勾上：后一段出发时的燃料 = 前一段的减去烧掉的，遇到加油步骤照加。不勾：每一段都按启航燃油量算">
+            <input v-model="workspace.fuelCarry" type="checkbox" />递减燃料</label>
+        </template>
         <label title="填了才检查会不会超出货舱">货舱
           <input v-model.number="workspace.shipWeight" class="cap" type="number" min="0" placeholder="t" /> t
           <input v-model.number="workspace.shipVolume" class="cap" type="number" min="0" placeholder="m³" /> m³</label>
@@ -638,7 +664,7 @@ function importPaste() {
         <span v-for="(i, n) in looseIssues" :key="n" :class="i.level === 'error' ? 'err' : 'warn'">{{ i.text }}</span>
         <span v-if="estimate && route.waypoints.length > 1">
           {{ route.repeats ? "跑一圈" : "全程" }}{{ estimate.totalSeconds == null ? "有的段估不了" : `约 ${formatDuration(estimate.totalSeconds)}` }}，
-          STL 约 {{ estimate.totalFuel }} SF<template v-if="estimate.totalFtlFuel">，FTL 约 {{ estimate.totalFtlFuel }} FF</template>（按现在出发、满油箱起步）。</span>
+          STL 约 {{ estimate.totalFuel }} SF<template v-if="estimate.totalFtlFuel">，FTL 约 {{ estimate.totalFtlFuel }} FF</template>（按现在出发、{{ startFuel == null ? "满油箱" : `${Math.min(startFuel, ship?.stlCapacity ?? startFuel)} SF ` }}起步{{ workspace.fuelCarry ? "" : "，每段都按这个油量算" }}）。</span>
         <span v-if="stale.length" class="warn">补给组「{{ stale.join("、") }}」是 6 小时以前算的，导出前建议先更新。</span>
         <span v-if="notice" :class="noticeBad ? 'err' : 'ok'">{{ notice }}</span>
       </div>

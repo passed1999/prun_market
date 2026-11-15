@@ -21,6 +21,10 @@ interface Workspace {
   /** 从游戏里复制来的船只参数；shipName 是当前用来估时间的那艘 */
   ships: ShipSpec[];
   shipName: string;
+  /** 估算时启航的 STL 燃料；null = 满油箱 */
+  startFuel: number | null;
+  /** 估算时燃料逐段递减（后一段按前一段剩下的算） */
+  fuelCarry: boolean;
   /** 从游戏里导出的星门清单；空 = 用内置的那份快照 */
   gateways: GatewayLink[];
   gatewaysAt: number;
@@ -29,7 +33,7 @@ interface Workspace {
 function load(): Workspace {
   const empty: Workspace = {
     routes: [], groups: [], activeRouteId: "", shipWeight: null, shipVolume: null, mergeAdjacent: false,
-    ships: [], shipName: "", gateways: [], gatewaysAt: 0,
+    ships: [], shipName: "", startFuel: null, fuelCarry: true, gateways: [], gatewaysAt: 0,
   };
   try {
     const raw = localStorage.getItem(KEY);

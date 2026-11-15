@@ -33,9 +33,19 @@ export interface CompileOptions {
   shipWeight?: number | null;
   shipVolume?: number | null;
   materials?: Record<string, MaterialInfo>;
+  /** 各地现在的库存（FIO）：{ 星球编号或空间站代码: { 材料: 数量 } }。给了就估「装满」能装多少 */
+  stock?: Record<string, Record<string, number>>;
 }
 
-export interface LegLoad { waypointId: string; weight: number; volume: number; exact: boolean }
+export interface LegLoad {
+  waypointId: string; weight: number; volume: number;
+  /** 船上没有数量不可知的材料 */
+  exact: boolean;
+  /** 这一站「装满」的步骤按当地库存估出来装了多少（已计入 weight / volume） */
+  filled: Record<string, number>;
+  /** 离站时船上数量不可知的材料（经过「装满」又估不出来的） */
+  open: string[];
+}
 
 export interface CompileResult {
   game: GameRoute;
@@ -313,8 +323,10 @@ function toSeconds(amount: number, unit: string): number {
 }
 
 /**
- * 按计划数量走一遍货舱：只认精确数量的步骤。循环路线走两圈，第二圈才是稳定状态。
- * 一种材料只要经过「装到满」，之后它在船上的数量就不可知，相关检查跳过。
+ * 按计划数量走一遍货舱。循环路线走两圈，第二圈才是稳定状态。
+ * 「装到满」：知道当地库存（opts.stock）时按 min(库存 − 保留量, 货舱还剩的载重 / 容积) 估；
+ * 估不了的话这种材料之后在船上的数量就不可知，相关检查跳过。
+ * 库存取的是现在的数，船到的时候会变；每一圈都从现在的库存算起。
  */
 function simulate(route: RouteDoc, game: GameRoute, opts: CompileOptions, issues: Issue[]): LegLoad[] {
   const known = opts.materials ?? {};
@@ -326,15 +338,37 @@ function simulate(route: RouteDoc, game: GameRoute, opts: CompileOptions, issues
   for (let round = 0; round < rounds; round++) {
     const last = round === rounds - 1;
     legs = [];
+    const shelves: Record<string, Record<string, number>> = {};
     game.waypoints.forEach((w, i) => {
       const wp = route.waypoints[i];
       const flagged = new Set<string>();
+      const filled: Record<string, number> = {};
+      const place = w.destination.naturalId;
+      // 当地库存的副本：同一圈里装走、卸下的都记上
+      const shelf = opts.stock?.[place] ? (shelves[place] ??= { ...opts.stock[place] }) : null;
+      const move = (ticker: string, n: number) => { if (shelf) shelf[ticker] = Math.max(0, (shelf[ticker] ?? 0) + n); };
       for (const s of w.steps) {
         if (s.type === "LOAD") {
-          if (s.maximum.type === "CAPACITY") unknown.add(s.material);
-          else cargo[s.material] = (cargo[s.material] ?? 0) + s.maximum.units;
+          if (s.maximum.type === "CAPACITY") {
+            const size = known[s.material];
+            if (!shelf || !size) unknown.add(s.material);
+            else {
+              const { weight, volume } = totals(cargo, known);
+              let n = Math.max(0, (shelf[s.material] ?? 0) - s.retain);
+              if (opts.shipWeight && size.weight > 0) n = Math.min(n, Math.floor((opts.shipWeight - weight) / size.weight + 1e-9));
+              if (opts.shipVolume && size.volume > 0) n = Math.min(n, Math.floor((opts.shipVolume - volume) / size.volume + 1e-9));
+              n = Math.max(0, n);
+              cargo[s.material] = (cargo[s.material] ?? 0) + n;
+              filled[s.material] = (filled[s.material] ?? 0) + n;
+              move(s.material, -n);
+            }
+          } else {
+            cargo[s.material] = (cargo[s.material] ?? 0) + s.maximum.units;
+            move(s.material, -s.maximum.units);
+          }
         } else if (s.type === "UNLOAD") {
           const aboard = cargo[s.material] ?? 0;
+          move(s.material, s.maximum.type === "CAPACITY" ? aboard : Math.min(aboard, s.maximum.units));
           if (s.maximum.type === "CAPACITY") {
             cargo[s.material] = 0;
             unknown.delete(s.material);
@@ -354,7 +388,7 @@ function simulate(route: RouteDoc, game: GameRoute, opts: CompileOptions, issues
         if (last && s.type === "LOAD") checkCapacity(wp, cargo, unknown, known, opts, issues, flagged);
       }
       const { weight, volume } = totals(cargo, known);
-      legs.push({ waypointId: wp.id, weight, volume, exact: unknown.size === 0 });
+      legs.push({ waypointId: wp.id, weight, volume, exact: unknown.size === 0, filled, open: [...unknown] });
     });
   }
   return legs;

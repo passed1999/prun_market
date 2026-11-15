@@ -173,25 +173,35 @@ export interface RouteEstimate {
 
 const WAIT: Record<string, number> = { SECONDS: 1, MINUTES: 60, HOURS: 3600, DAYS: 86400 };
 
+export interface FuelOptions {
+  /** 启航时船上的 STL 燃料；null = 满油箱 */
+  start: number | null;
+  /** 逐段递减：后一段出发时的燃料 = 前一段的减去烧掉的（加油步骤照加）。关掉则每一段都按启航燃油量算 */
+  carry: boolean;
+}
+
 /**
  * cargoAfter[i] = 离开第 i 站时船上的货（吨），来自 compile 的结果。
- * 燃料：出发时按满油箱；遇到 STL 加油步骤就加（加到满 / 加指定数量）。循环路线多走一圈取稳定状态。
+ * 燃料：出发时按 fuel.start（默认满油箱）；递减时遇到 STL 加油步骤就加（加到满 / 加指定数量）。
+ * 循环路线在没指定启航燃油量时多走一圈取稳定状态；指定了就只算从这个油量出发的第一圈。
  */
 export async function estimateRoute(
   game: GameRoute, cargoAfter: number[], ship: ShipSpec, nowSec: number, links: GatewayLink[],
+  options: FuelOptions = { start: null, carry: true },
 ): Promise<RouteEstimate> {
   const stops = game.waypoints;
   const n = stops.length;
   if (n < 2) return { legs: [], totalSeconds: 0, totalFuel: 0, totalFtlFuel: 0 };
   const where = await Promise.all(stops.map((w) => place(w.destination.naturalId.trim())));
 
-  let fuel = ship.stlCapacity;
+  const startFuel = options.start == null ? ship.stlCapacity : Math.min(ship.stlCapacity, Math.max(0, options.start));
+  let fuel = startFuel;
   let t = nowSec;
   const dwell = (i: number) => {
     let wait = 0;
     for (const s of stops[i].steps) {
       if (s.type === "WAIT") wait += s.amount * (WAIT[s.unit] ?? 1);
-      if (s.type === "REFUEL" && s.fuel === "STL") {
+      if (options.carry && s.type === "REFUEL" && s.fuel === "STL") {
         fuel = s.maximum.type === "CAPACITY" ? ship.stlCapacity : Math.min(ship.stlCapacity, fuel + s.maximum.units);
       }
     }
@@ -200,7 +210,7 @@ export async function estimateRoute(
 
   let legs: RouteLeg[] = [];
   let total: number | null = 0;
-  const rounds = game.repeats ? 2 : 1;
+  const rounds = game.repeats && options.carry && options.start == null ? 2 : 1;
   for (let round = 0; round < rounds; round++) {
     legs = [];
     total = 0;
@@ -228,7 +238,7 @@ export async function estimateRoute(
       legs.push({ ...est, toIndex: to, fuelBefore: fuel });
       if (est.unknown) total = null;
       else {
-        fuel = Math.max(0, fuel - est.stlFuel);
+        if (options.carry) fuel = Math.max(0, fuel - est.stlFuel);
         t += est.seconds;
         if (total != null) total += est.seconds;
       }

@@ -44,7 +44,12 @@ watch(account, () => {
 
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-interface Empire { sites: Row[]; storage: Row[]; workforce: Row[]; production: Row[]; at: number; who: string }
+interface Empire {
+  sites: Row[]; storage: Row[]; workforce: Row[]; production: Row[];
+  /** 在空间站 / 星球上租的仓库；取不到就当没有 */
+  warehouses: Row[];
+  at: number; who: string;
+}
 let cache: Empire | null = null;
 
 async function get(path: string): Promise<Row[]> {
@@ -72,10 +77,11 @@ async function empire(force = false): Promise<Empire> {
     throw new FioError("先填 FIO 的用户名和 API key。");
   }
   if (!force && cache && cache.who === who && Date.now() - cache.at < FRESH_MS) return cache;
-  const [sites, storage, workforce, production] = await Promise.all([
+  const [sites, storage, workforce, production, warehouses] = await Promise.all([
     get("/sites"), get("/storage"), get("/workforce"), get("/production"),
+    get("/sites/warehouses").catch(() => [] as Row[]),
   ]);
-  cache = { sites, storage, workforce, production, at: Date.now(), who };
+  cache = { sites, storage, workforce, production, warehouses, at: Date.now(), who };
   return cache;
 }
 
@@ -87,6 +93,34 @@ export async function listBases(force = false): Promise<Base[]> {
     .map((s) => ({ naturalId: String(s.PlanetIdentifier ?? ""), name: String(s.PlanetName ?? "") }))
     .filter((b) => b.naturalId)
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 各个地点现在的库存：{ 星球编号或空间站代码: { 材料: 数量 } }。没有基地也没有仓库的地方不在里面 */
+export type Stocks = Record<string, Record<string, number>>;
+
+/**
+ * 路线里「装满」的步骤能装多少，要看当地库存里现在有多少。
+ * 有基地的星球取基地库存，否则取在那里租的仓库（空间站只有仓库）。
+ */
+export async function localStocks(force = false): Promise<Stocks> {
+  const e = await empire(force);
+  const out: Stocks = {};
+  const take = (where: string, store: Row | undefined) => {
+    if (!where || !store || out[where]) return;
+    const have: Record<string, number> = {};
+    for (const item of store.StorageItems ?? []) {
+      if (item.Type !== "INVENTORY" || !item.MaterialTicker) continue;
+      have[item.MaterialTicker] = (have[item.MaterialTicker] ?? 0) + item.MaterialAmount;
+    }
+    out[where] = have;
+  };
+  for (const s of e.sites) {
+    take(String(s.PlanetIdentifier ?? ""), e.storage.find((x) => x.Type === "STORE" && x.AddressableId === s.SiteId));
+  }
+  for (const w of e.warehouses) {
+    take(String(w.LocationNaturalId ?? ""), e.storage.find((x) => x.StorageId === w.StoreId));
+  }
+  return out;
 }
 
 /** 一条产线上每个计入的订单及其每日执行次数 */
