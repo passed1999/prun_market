@@ -4,7 +4,7 @@
  *     建筑数量(B)   = Σ B 的每条配方每天跑的轮数 × 每轮耗时(天) ÷ 平均效率
  *     月维修消耗(T) = Σ 建筑数量(B) × B 的建造用量(T) ÷ 180 × 30
  *
- * 每条配方每天跑多少轮沿用全服市场的推法（market.recipeRuns：由产出反推，多条配方产同一材料时等权拆分）。
+ * 每条配方每天跑多少轮由产出反推，尽量只用该配方独占的产出（见 market.solveRuns）。
  * 维修口径：建筑满 180 天折旧完，维修用量与距上次维修的天数成正比，所以不管多久修一次，
  * 摊到每天都是「建造用量 ÷ 180」。
  *
@@ -16,7 +16,7 @@
  */
 import { fio, stats } from "../data/sources";
 import type { FioBuilding, FioRecipe } from "../api/types";
-import { monthLabel, recipeRuns, resolveMonth } from "./market";
+import { monthLabel, resolveMonth, solveRuns } from "./market";
 
 const DAY_MS = 86_400_000;
 /** 建筑从全新到完全折旧的天数 */
@@ -32,6 +32,9 @@ function extractorOf(category: string): string {
   if (category === "liquids") return "RIG";
   return "EXT";
 }
+
+/** 天然资源所在的分类：这些材料的产量里可能有采集来的 */
+const RESOURCE_CATEGORIES = new Set(["gases", "liquids", "ores", "minerals"]);
 
 export interface BuildingInputs {
   month: string;
@@ -118,17 +121,27 @@ export function compute(input: BuildingInputs, options: BuildingOptions): Buildi
   };
 
   const made = new Set<string>();
-  for (const recipe of input.recipes) for (const o of recipe.Outputs ?? []) made.add(o.Ticker);
+  for (const recipe of input.recipes) for (const o of recipe.Outputs ?? []) if (o.Amount) made.add(o.Ticker);
 
-  for (const { recipe, outputs, runs, approx } of recipeRuns(input.amount, input.recipes)) {
+  // 配方没解释掉的产量
+  const residual: Record<string, number> = { ...input.amount };
+  for (const { recipe, outputs, runs, approx } of solveRuns(input.amount, input.recipes)) {
     const count = runs * (recipe.TimeMs / DAY_MS) / efficiency;
-    bump(recipe.BuildingTicker, count, approx, outputs.map(([t]) => t));
+    // 座数记在决定轮数的产出上，副产物不占座
+    bump(recipe.BuildingTicker, count, approx, outputs.filter((o) => o.key).map((o) => o.ticker));
+    for (const o of outputs) residual[o.ticker] = (residual[o.ticker] ?? 0) - runs * o.perRun;
   }
-  // 没有任何配方产出、却有产量的，就是采出来的原料
+  // 采出来的原料：没有任何配方产出的全算；既能采又是副产物的（如 O），只算配方解释不掉的那部分
   for (const [ticker, daily] of Object.entries(input.amount)) {
-    if (daily <= 0 || made.has(ticker)) continue;
-    const building = extractorOf(input.category[ticker] ?? "");
-    bump(building, daily / (EXTRACTORS[building] * concentration * efficiency), true, [ticker]);
+    if (daily <= 0) continue;
+    const category = input.category[ticker] ?? "";
+    let extracted = daily;
+    if (made.has(ticker)) {
+      extracted = residual[ticker] ?? 0;
+      if (!RESOURCE_CATEGORIES.has(category) || extracted < daily * 0.005) continue;
+    }
+    const building = extractorOf(category);
+    bump(building, extracted / (EXTRACTORS[building] * concentration * efficiency), true, [ticker]);
   }
 
   const info = new Map(input.buildings.map((b) => [b.Ticker, b]));

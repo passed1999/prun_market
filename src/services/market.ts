@@ -1,16 +1,17 @@
 /**
  * 全服市场统计：把每月的全服产量摊开成「供给 / 需求 / 集中度」。
- * 从 prun_selfplanner 的 services/market.py 逐行移植，算法与常数不变。
+ * 从 prun_selfplanner 的 services/market.py 移植；配方轮数的反推已改写（见 solveRuns），其余算法与常数不变。
  *
  * 供给侧是现成的（每种材料的全服日产量），需求侧要自己推，分两段：
  *
  *     产线消耗(T) = Σ 每条配方每天跑的轮数 × 该配方每轮吃掉多少 T
  *     工人消费(T) = Σ 各级工人数 × 该级每 100 人日用量 / 100
  *
- * 配方每天跑多少轮由它的产出反推：某材料由 N 条配方产出时按等权拆分。
+ * 配方每天跑多少轮由它的产出反推，尽量只用该配方独占的产出；全是共享产出时才等权拆分。
  * 全服工人数由「只有某一级工人吃的必需品」反推，取该级各独占品估计值的中位数。
  *
- * 对账（原项目）：数据源在 apr26 及以前自带 consumed，14 个月总量比 0.980–1.021，逐材料 ±10% 命中约七成。
+ * 对账：数据源在 apr26 及以前自带 consumed。原项目的等权平均推法 14 个月总量比 0.980–1.021，逐材料 ±10% 命中约七成；
+ * 改用独占产出后抽查 jul25 / oct25 / jan26 / apr26 四个月，总量比 0.978–1.008，逐材料 ±10% 命中 79–85%。
  * 建造与造船的消耗算不出来，这类材料 confidence = partial，净流只能当上限看。
  */
 import { DataError } from "../api/client";
@@ -127,30 +128,57 @@ function estimatePopulation(amount: Record<string, number>, line: Record<string,
   return out;
 }
 
-export interface RecipeRun {
+export interface SolvedRun {
   recipe: FioRecipe;
-  /** [ticker, 每轮产出]，已去掉产出量为 0 的 */
-  outputs: (readonly [string, number])[];
-  /** 全服每天跑的轮数 */
+  /** key：轮数就是由这项产出卡住的；其余是副产物（没有独占产出的配方全部算 key）*/
+  outputs: { ticker: string; perRun: number; key: boolean }[];
   runs: number;
-  /** 有产出由多条配方共享，轮数是等权拆出来的 */
   approx: boolean;
 }
 
-/** 由全服日产量反推每条配方每天跑多少轮；某材料由 N 条配方产出时按等权拆分 */
-export function recipeRuns(amount: Record<string, number>, recipes: FioRecipe[]): RecipeRun[] {
-  const byOutput: Record<string, FioRecipe[]> = {};
-  for (const recipe of recipes) {
-    for (const out of recipe.Outputs ?? []) (byOutput[out.Ticker] ??= []).push(recipe);
+/**
+ * 由全服日产量反推每条配方每天跑多少轮，尽量只用「独占产出」定轮数。
+ *
+ * 一种材料只有一条配方产出时，它对这条配方是独占的：轮数 = 产量 ÷ 每轮产出，没有歧义。
+ * 配方有多项产出时取各项里最小的那个轮数，因为任何一项都不可能产得比全服产量还多——
+ * 例如 TNP 的 TCO => TC + O，O 的全服产量绝大部分是采集来的，轮数由 TC 决定。
+ * 所有产出都与别的配方共享时才退回拆分：先扣掉已定配方的产量，剩下的在候选配方间等权分。
+ */
+export function solveRuns(amount: Record<string, number>, recipes: FioRecipe[]): SolvedRun[] {
+  const parsed = recipes
+    .map((recipe) => ({
+      recipe,
+      outputs: (recipe.Outputs ?? []).filter((o) => o.Amount).map((o) => ({ ticker: o.Ticker, perRun: o.Amount })),
+    }))
+    .filter((p) => p.outputs.length);
+  const producers: Record<string, number> = {};
+  for (const p of parsed) for (const o of p.outputs) producers[o.ticker] = (producers[o.ticker] ?? 0) + 1;
+
+  const result: SolvedRun[] = [];
+  const remaining: Record<string, number> = { ...amount };
+  const shared: typeof parsed = [];
+  const waiting: Record<string, number> = {};
+  for (const p of parsed) {
+    if (!p.outputs.some((o) => producers[o.ticker] === 1)) {
+      shared.push(p);
+      for (const o of p.outputs) waiting[o.ticker] = (waiting[o.ticker] ?? 0) + 1;
+      continue;
+    }
+    const runs = Math.min(...p.outputs.map((o) => (amount[o.ticker] ?? 0) / o.perRun));
+    for (const o of p.outputs) remaining[o.ticker] = (remaining[o.ticker] ?? 0) - runs * o.perRun;
+    if (runs > 0) {
+      result.push({
+        recipe: p.recipe, runs, approx: false,
+        outputs: p.outputs.map((o) => ({ ...o, key: (amount[o.ticker] ?? 0) / o.perRun <= runs * 1.001 })),
+      });
+    }
   }
-  const result: RecipeRun[] = [];
-  for (const recipe of recipes) {
-    const outputs = (recipe.Outputs ?? []).filter((o) => o.Amount).map((o) => [o.Ticker, o.Amount] as const);
-    if (!outputs.length) continue;              // 采集类的空配方（RIG:=>）
-    const rates = outputs.map(([ticker, perRun]) => ((amount[ticker] ?? 0) / byOutput[ticker].length) / perRun);
-    const runs = rates.reduce((s, r) => s + r, 0) / rates.length;
-    if (runs <= 0) continue;
-    result.push({ recipe, outputs, runs, approx: outputs.some(([ticker]) => byOutput[ticker].length > 1) });
+  for (const p of shared) {
+    const runs = Math.min(...p.outputs.map((o) =>
+      Math.max(0, remaining[o.ticker] ?? 0) / waiting[o.ticker] / o.perRun));
+    if (runs > 0) {
+      result.push({ recipe: p.recipe, runs, approx: true, outputs: p.outputs.map((o) => ({ ...o, key: true })) });
+    }
   }
   return result;
 }
@@ -162,10 +190,10 @@ export function estimateDemand(amount: Record<string, number>, ref: GameRef): De
   const madeBy: Record<string, MarketRecipeUse[]> = {};
   const splitDownstream = new Set<string>();
 
-  for (const { recipe, outputs, runs, approx } of recipeRuns(amount, ref.recipes)) {
+  for (const { recipe, outputs, runs, approx } of solveRuns(amount, ref.recipes)) {
     const recipeId = recipe.StandardRecipeName;
     const building = recipe.BuildingTicker ?? "";
-    for (const [ticker, perRun] of outputs) {
+    for (const { ticker, perRun } of outputs) {
       (madeBy[ticker] ??= []).push({ recipe_id: recipeId, building_ticker: building, daily_amount: runs * perRun });
     }
     for (const item of recipe.Inputs ?? []) {
