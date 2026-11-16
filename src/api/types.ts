@@ -206,6 +206,7 @@ export interface FioStation {
 
 export interface FioBuilding {
   Ticker: string;
+  Name?: string;
   AreaCost: number;
   Pioneers: number;
   Settlers: number;

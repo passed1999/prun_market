@@ -127,27 +127,44 @@ function estimatePopulation(amount: Record<string, number>, line: Record<string,
   return out;
 }
 
-/** 由全服日产量推全服日消耗。amount 是 {ticker: 日产量} */
-export function estimateDemand(amount: Record<string, number>, ref: GameRef): Demand {
+export interface RecipeRun {
+  recipe: FioRecipe;
+  /** [ticker, 每轮产出]，已去掉产出量为 0 的 */
+  outputs: (readonly [string, number])[];
+  /** 全服每天跑的轮数 */
+  runs: number;
+  /** 有产出由多条配方共享，轮数是等权拆出来的 */
+  approx: boolean;
+}
+
+/** 由全服日产量反推每条配方每天跑多少轮；某材料由 N 条配方产出时按等权拆分 */
+export function recipeRuns(amount: Record<string, number>, recipes: FioRecipe[]): RecipeRun[] {
   const byOutput: Record<string, FioRecipe[]> = {};
-  for (const recipe of ref.recipes) {
+  for (const recipe of recipes) {
     for (const out of recipe.Outputs ?? []) (byOutput[out.Ticker] ??= []).push(recipe);
   }
-  const line: Record<string, number> = {};
-  const consumedBy: Record<string, MarketRecipeUse[]> = {};
-  const madeBy: Record<string, MarketRecipeUse[]> = {};
-  const multiSource = new Set(Object.entries(byOutput).filter(([, rs]) => rs.length > 1).map(([t]) => t));
-  const splitDownstream = new Set<string>();
-
-  for (const recipe of ref.recipes) {
+  const result: RecipeRun[] = [];
+  for (const recipe of recipes) {
     const outputs = (recipe.Outputs ?? []).filter((o) => o.Amount).map((o) => [o.Ticker, o.Amount] as const);
     if (!outputs.length) continue;              // 采集类的空配方（RIG:=>）
     const rates = outputs.map(([ticker, perRun]) => ((amount[ticker] ?? 0) / byOutput[ticker].length) / perRun);
     const runs = rates.reduce((s, r) => s + r, 0) / rates.length;
     if (runs <= 0) continue;
+    result.push({ recipe, outputs, runs, approx: outputs.some(([ticker]) => byOutput[ticker].length > 1) });
+  }
+  return result;
+}
+
+/** 由全服日产量推全服日消耗。amount 是 {ticker: 日产量} */
+export function estimateDemand(amount: Record<string, number>, ref: GameRef): Demand {
+  const line: Record<string, number> = {};
+  const consumedBy: Record<string, MarketRecipeUse[]> = {};
+  const madeBy: Record<string, MarketRecipeUse[]> = {};
+  const splitDownstream = new Set<string>();
+
+  for (const { recipe, outputs, runs, approx } of recipeRuns(amount, ref.recipes)) {
     const recipeId = recipe.StandardRecipeName;
     const building = recipe.BuildingTicker ?? "";
-    const approx = outputs.some(([ticker]) => multiSource.has(ticker));
     for (const [ticker, perRun] of outputs) {
       (madeBy[ticker] ??= []).push({ recipe_id: recipeId, building_ticker: building, daily_amount: runs * perRun });
     }
@@ -215,7 +232,7 @@ export async function availableMonths(force = false): Promise<string[]> {
   return Object.keys(universe).sort((a, b) => cmpMonth(b, a));
 }
 
-async function resolveMonth(month: string | undefined, force = false): Promise<[string, string[]]> {
+export async function resolveMonth(month: string | undefined, force = false): Promise<[string, string[]]> {
   const months = await availableMonths(force);
   if (!months.length) throw new DataError("暂时取不到全服统计数据。");
   if (month && !months.includes(month)) throw new DataError("这个月份还没有全服统计数据。");

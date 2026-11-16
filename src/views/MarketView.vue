@@ -3,13 +3,14 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { errorText } from "../api/client";
 import { categoryColor, categoryLabel, categoryTextColor } from "../api/materials";
+import BuildingsPanel from "../components/market/BuildingsPanel.vue";
 import * as market from "../services/market";
 import type { MarketCompany, MarketMaterial, MarketSnapshot } from "../api/types";
 
 const snapshot = ref<MarketSnapshot | null>(null);
 const detail = ref<MarketMaterial | null>(null);
 const companies = ref<MarketCompany[]>([]);
-const mode = ref<"materials" | "companies">("materials");
+const mode = ref<"materials" | "companies" | "buildings">("materials");
 const month = ref("");
 const search = ref("");
 const category = ref("");
@@ -154,6 +155,7 @@ function sparkline(values: number[]): string {
     <div class="bar tabs">
       <button :class="{ on: mode === 'materials' }" @click="mode = 'materials'">材料</button>
       <button :class="{ on: mode === 'companies' }" @click="mode = 'companies'">公司</button>
+      <button :class="{ on: mode === 'buildings' }" @click="mode = 'buildings'">建筑</button>
     </div>
 
     <template v-if="mode === 'companies'">
@@ -170,6 +172,8 @@ function sparkline(values: number[]): string {
         </tbody>
       </table>
     </template>
+
+    <BuildingsPanel v-else-if="mode === 'buildings'" :month="month" />
 
     <template v-else>
     <div class="bar">
@@ -304,7 +308,7 @@ function sparkline(values: number[]): string {
 
     </template>
 
-    <details class="notes">
+    <details v-if="mode !== 'buildings'" class="notes">
       <summary>数据口径</summary>
       <p>
         产量来自每月发布的全服排行榜，次月初更新，因此最新月份通常是上个月。
