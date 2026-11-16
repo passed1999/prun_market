@@ -61,6 +61,10 @@ export function parseFile(text: string, fileName: string): Imported {
   if (data.format === "prun-matgroup") {
     const g = newGroup(String(data.name ?? fileName), cleanMaterials(data.materials), String(data.origin ?? "文件"));
     if (typeof data.id === "string" && data.id) g.id = data.id;
+    if (Array.isArray(data.excluded)) {
+      const excluded = [...new Set(data.excluded.map((t) => String(t).trim().toUpperCase()).filter(Boolean))];
+      if (excluded.length) g.excluded = excluded;
+    }
     if (isObj(data.resupply) && typeof data.resupply.planet === "string") {
       const r = data.resupply;
       g.resupply = {
@@ -94,6 +98,38 @@ export function parseFile(text: string, fileName: string): Imported {
     return { kind: "groups", groups, skipped };
   }
   throw new ImportError(`认不出「${fileName}」是什么文件。`);
+}
+
+/** 覆盖一个已有材料组时换掉的部分；id 和名字留着原来的，路线里的引用不会断 */
+export type GroupContent = Pick<MaterialGroup, "materials" | "excluded" | "resupply" | "origin">;
+
+/**
+ * 读一段用来覆盖某个材料组的 json。认三种：
+ *   本工具的材料组、只有一个可用组的 XIT ACT 包、直接写的 { "RAT": 300, "DW": 400 }
+ */
+export function parseGroupContent(text: string): GroupContent {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new ImportError("这不是合法的 JSON。");
+  }
+  if (!isObj(data)) throw new ImportError("这段 json 里没有材料。");
+  if (data.format === "prun-matgroup" || Array.isArray(data.groups)) {
+    const got = parseFile(text, "粘贴的内容");
+    if (got.kind !== "groups") throw new ImportError("这段 json 不是材料组。");
+    if (got.groups.length !== 1) {
+      throw new ImportError(got.groups.length
+        ? `这个包里有 ${got.groups.length} 个材料组，覆盖时只能有一个。`
+        : "这个包里的数量要在游戏里现算，内容里没有，没法用来覆盖。");
+    }
+    const { materials, excluded, resupply, origin } = got.groups[0];
+    return { materials, excluded, resupply, origin };
+  }
+  if (typeof data.format === "string") throw new ImportError("这段 json 不是材料组。");
+  const materials = cleanMaterials(data);
+  if (!Object.keys(materials).length) throw new ImportError("这段 json 里没有「材料: 数量」。");
+  return { materials, excluded: undefined, resupply: undefined, origin: "手动" };
 }
 
 function amount(raw: unknown, fallback: Amount): Amount {

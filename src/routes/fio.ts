@@ -207,7 +207,11 @@ export type Sizes = Record<string, { weight: number; volume: number }>;
  * 取装得下（重量和体积都不超）的最大的 T。ceil 让装载量随 T 只增不减，所以二分即可。
  * 扣库存时这相当于把每种材料都补到同一个剩余天数，已经堆得多的就不带了。
  */
-export async function resupply(spec: ResupplySpec, sizes: Sizes = {}, force = true): Promise<ResupplyResult> {
+export async function resupply(
+  spec: ResupplySpec, sizes: Sizes = {}, force = true, excluded: string[] = [],
+): Promise<ResupplyResult> {
+  // 被排除的材料照样算出数量（界面上要能看到、能恢复），只是「装满货舱」时不占地方
+  const skip = new Set(excluded);
   const e = await empire(force);
   const site = e.sites.find((s) => s.PlanetIdentifier === spec.planet);
   if (!site) throw new FioError(`FIO 的数据里没有 ${spec.planetName || spec.planet} 这个基地。`);
@@ -231,12 +235,13 @@ export async function resupply(spec: ResupplySpec, sizes: Sizes = {}, force = tr
     const maxWeight = spec.cargoWeight ?? 0;
     const maxVolume = spec.cargoVolume ?? 0;
     if (!(maxWeight > 0) || !(maxVolume > 0)) throw new FioError("先填货舱的载重和容积。");
-    const unknown = burning.map(([t]) => t).filter((t) => !sizes[t]);
+    const carried = burning.filter(([t]) => !skip.has(t));
+    const unknown = carried.map(([t]) => t).filter((t) => !sizes[t]);
     if (unknown.length) throw new FioError(`${unknown.join("、")} 的重量体积还没取到，稍后再点一次「更新」。`);
     const fits = (t: number) => {
       let weight = 0;
       let volume = 0;
-      for (const [ticker, net] of burning) {
+      for (const [ticker, net] of carried) {
         const n = needAt(net, stock[ticker] ?? 0, t);
         weight += n * sizes[ticker].weight;
         volume += n * sizes[ticker].volume;

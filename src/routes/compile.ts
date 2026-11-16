@@ -2,7 +2,8 @@
  * 把「抽象」路线展开成游戏里的逐材料步骤，并顺带做检查。
  *
  * 展开规则：
- *   材料组        每种材料一个步骤，最小 = 最大 = 组里的数量（精确值，装不够 / 卸不够就等）
+ *   材料组        每种材料一个步骤，最小 = 最大 = 组里的数量（精确值，装不够 / 卸不够就等）；
+ *                 组里被排除的材料不出步骤
  *   引用          取被引用 waypoint 里所有同类（装或卸）步骤展开后的内容，换成本步骤的方向；
  *                 数量照抄，「capacity」照抄（装 = 装到满，卸 = 船上全部）。
  *                 「装 ← 某站的卸货内容」会扣掉途中已经装上的部分，见 mirrorLines
@@ -14,7 +15,7 @@
 import type {
   Amount, GameRoute, GameStep, GameWaypoint, MaterialGroup, MirrorStep, Op, RouteDoc, Step, Waypoint,
 } from "./model";
-import { abs, clampPercent, destinationLabel } from "./model";
+import { abs, activeMaterials, clampPercent, destinationLabel } from "./model";
 
 export interface Line { ticker: string; min: Amount; max: Amount; retain: number }
 
@@ -68,9 +69,7 @@ export function stepLines(route: RouteDoc, groups: Groups, step: Step, trail: st
   if (step.kind === "group") {
     const g = groups[step.groupId];
     if (!g) return [];
-    return Object.entries(g.materials)
-      .filter(([, n]) => n > 0)
-      .map(([ticker, n]) => ({ ticker, min: abs(n), max: abs(n), retain: 0 }));
+    return Object.entries(activeMaterials(g)).map(([ticker, n]) => ({ ticker, min: abs(n), max: abs(n), retain: 0 }));
   }
   if (step.kind === "mirror") return mirrorLines(route, groups, step, trail).lines;
   return [];

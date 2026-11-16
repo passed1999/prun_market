@@ -96,7 +96,18 @@ export interface MaterialGroup {
   /** 从哪来的，只做展示 */
   origin: string;
   materials: Record<string, number>;
+  /**
+   * 被排除的材料：留在 materials 里（随时可以恢复），但装卸时不算。
+   * 补给组重算后也记得；「装满货舱」的补给组会把腾出来的地方分给别的材料。
+   */
+  excluded?: string[];
   resupply?: ResupplySpec;
+}
+
+/** 一个材料组实际要装卸的内容：去掉被排除的和数量不是正数的 */
+export function activeMaterials(g: MaterialGroup): Record<string, number> {
+  const skip = new Set(g.excluded ?? []);
+  return Object.fromEntries(Object.entries(g.materials).filter(([t, n]) => n > 0 && !skip.has(t)));
 }
 
 // ---- 导出给游戏的格式 ----

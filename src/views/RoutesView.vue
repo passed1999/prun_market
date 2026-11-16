@@ -14,10 +14,10 @@ import type { Stocks } from "../routes/fio";
 import { account, baseProducts, FioError, listBases, localStocks, resupply } from "../routes/fio";
 import { buildBuyPlan } from "../routes/act";
 import { fio } from "../data/sources";
-import { copyText, download, ImportError, parseFile, safeName, toText } from "../routes/io";
+import { copyText, download, ImportError, parseFile, parseGroupContent, safeName, toText } from "../routes/io";
 import type { MaterialGroup, RouteDoc, Step, Waypoint } from "../routes/model";
-import { abs, cap, destinationLabel, newGroup, newId, newRoute, newWaypoint } from "../routes/model";
-import { relinkGroups, upsertGroup, upsertRoute, workspace } from "../routes/store";
+import { abs, activeMaterials, cap, destinationLabel, newGroup, newId, newRoute, newWaypoint } from "../routes/model";
+import { relinkGroups, upsertGroups, upsertRoute, workspace } from "../routes/store";
 
 const { materials } = useCatalog();
 const tickers = computed(() => Object.keys(materials.value).sort());
@@ -251,9 +251,44 @@ const edges = computed<Edge[]>(() => {
 const openGroup = ref("");
 const draft = ref("");
 
+const overrideOpen = ref(false);
+const overrideText = ref("");
+
 function showGroup(g: MaterialGroup) {
+  if (openGroup.value !== g.id) { overrideOpen.value = false; overrideText.value = ""; }
   openGroup.value = g.id;
   draft.value = Object.entries(g.materials).map(([t, n]) => `${t} ${n}`).join("\n");
+}
+/** 排除 / 恢复组里的一种材料。「装满货舱」的补给组要重算，腾出来的地方分给别的材料 */
+function toggleExcluded(g: MaterialGroup, ticker: string) {
+  const list = g.excluded ?? [];
+  const next = list.includes(ticker) ? list.filter((t) => t !== ticker) : [...list, ticker];
+  g.excluded = next.length ? next : undefined;
+  if (g.resupply?.mode === "cargo") refreshGroup(g, false);
+}
+/** 界面上列出来的材料：组里有的，加上被排除、这次重算又没出现的（还得能点回来） */
+function chipsOf(g: MaterialGroup): { ticker: string; qty: number | null; off: boolean }[] {
+  const off = new Set(g.excluded ?? []);
+  return [
+    ...Object.entries(g.materials).map(([ticker, qty]) => ({ ticker, qty, off: off.has(ticker) })),
+    ...[...off].filter((t) => !(t in g.materials)).map((ticker) => ({ ticker, qty: null, off: true })),
+  ];
+}
+/** 用粘贴的 json 换掉这个组的内容；id 和名字不变，路线里用到它的步骤跟着变 */
+function overrideGroup(g: MaterialGroup) {
+  try {
+    const got = parseGroupContent(overrideText.value);
+    g.materials = got.materials;
+    g.excluded = got.excluded;
+    g.resupply = got.resupply;
+    g.origin = got.origin;
+    overrideOpen.value = false;
+    overrideText.value = "";
+    showGroup(g);
+    say(`材料组「${g.name}」已用 json 覆盖：${Object.keys(got.materials).length} 种材料。`);
+  } catch (e) {
+    say(e instanceof ImportError ? e.message : "这段 json 读不出来。", true);
+  }
 }
 function toggleGroup(g: MaterialGroup) {
   if (openGroup.value === g.id) openGroup.value = "";
@@ -275,6 +310,9 @@ function applyDraft(g: MaterialGroup) {
     if (n > 0) out[ticker.toUpperCase()] = (out[ticker.toUpperCase()] ?? 0) + n;
   }
   g.materials = out;
+  // 手填的组里删掉了的材料，排除记录也一起去掉
+  const kept = (g.excluded ?? []).filter((t) => t in out);
+  g.excluded = kept.length ? kept : undefined;
 }
 function renameGroup(g: MaterialGroup) {
   for (const r of workspace.routes) {
@@ -292,10 +330,11 @@ async function copyGroup(g: MaterialGroup) {
   else say("浏览器不让写剪贴板，请改用存成文件。", true);
 }
 function groupSize(g: MaterialGroup): string {
-  const kinds = Object.keys(g.materials).length;
+  const active = activeMaterials(g);
+  const kinds = Object.keys(active).length;
   let weight = 0;
   let volume = 0;
-  for (const [t, n] of Object.entries(g.materials)) {
+  for (const [t, n] of Object.entries(active)) {
     const m = materials.value[t];
     if (m) { weight += m.weight * n; volume += m.volume * n; }
   }
@@ -380,17 +419,18 @@ function changeSpec(g: MaterialGroup, patch: {
   if (!g.name || g.name === was) { g.name = autoName(g); renameGroup(g); }
   refreshGroup(g);
 }
-async function refreshGroup(g: MaterialGroup) {
+/** force = false：只是换了排除的材料，FIO 的数据用几分钟内取过的就行 */
+async function refreshGroup(g: MaterialGroup, force = true) {
   if (!g.resupply) return;
   busy.value = g.id;
   try {
-    const got = await resupply(g.resupply, materials.value);
+    const got = await resupply(g.resupply, materials.value, force, g.excluded);
     g.resupply.fitDays = g.resupply.mode === "cargo" ? got.days : undefined;
     g.materials = got.materials;
     g.resupply.planetName = got.planetName;
     g.resupply.updatedAt = Date.now();
     if (openGroup.value === g.id) showGroup(g);
-    const kinds = Object.keys(got.materials).length;
+    const kinds = Object.keys(activeMaterials(g)).length;
     say(kinds
       ? `「${g.name}」已按 FIO 的最新数据更新：${kinds} 种材料。`
       : g.resupply.mode === "cargo"
@@ -451,6 +491,7 @@ function take(sources: { name: string; text: string }[]) {
   const done: string[] = [];
   const failed: string[] = [];
   let groupCount = 0;
+  let replaced = 0;
   for (const src of sources) {
     try {
       const got = parseFile(src.text, src.name);
@@ -471,7 +512,7 @@ function take(sources: { name: string; text: string }[]) {
         upsertRoute(got.route);
         done.push(`路线「${got.route.name}」`);
       } else {
-        got.groups.forEach(upsertGroup);
+        replaced += upsertGroups(got.groups);
         groupCount += got.groups.length;
         if (got.skipped.length) {
           failed.push(`${got.skipped.join("、")} 的数量要在游戏里现算，内容里没有，没法导入（可以改用「+ 补给组」）`);
@@ -481,8 +522,10 @@ function take(sources: { name: string; text: string }[]) {
       failed.push(e instanceof ImportError ? e.message : `「${src.name}」读不出来。`);
     }
   }
-  if (groupCount) done.push(`${groupCount} 个材料组`);
+  if (groupCount) done.push(`${groupCount} 个材料组${replaced ? `（${replaced} 个覆盖了原有的）` : ""}`);
   relinkGroups();
+  const open = workspace.groups.find((g) => g.id === openGroup.value);
+  if (open) showGroup(open);
   say([done.length ? `已载入 ${done.join("、")}。` : "", ...failed].filter(Boolean).join(" "), failed.length > 0);
   return failed.length === 0;
 }
@@ -570,22 +613,33 @@ function importPaste() {
                   <input v-model="g.resupply.includeLuxuries" type="checkbox" @change="refreshGroup(g)" />含奢侈品</label>
                 <label title="勾上：带的量 = 需要的量 − 基地里已有的；不勾：按满量带">
                   <input v-model="g.resupply.deductStock" type="checkbox" @change="refreshGroup(g)" />扣掉基地现有库存</label>
-                <div class="chips">
-                  <i v-for="(n, t) in g.materials" :key="t">{{ t }} {{ n }}</i>
-                  <span v-if="!Object.keys(g.materials).length" class="dim">现在不用带东西。</span>
-                </div>
+                <div v-if="!Object.keys(g.materials).length" class="dim">现在不用带东西。</div>
                 <div class="dim">{{ busy === g.id ? "正在读 FIO…" : ago(g.resupply.updatedAt) }}</div>
               </template>
               <template v-else>
                 <textarea v-model="draft" rows="8" spellcheck="false" placeholder="每行一种：RAT 300" @change="applyDraft(g)" />
                 <div class="dim">来源：{{ g.origin }}</div>
               </template>
+              <div v-if="chipsOf(g).length" class="chips">
+                <button v-for="c in chipsOf(g)" :key="c.ticker" type="button" class="chip" :class="{ off: c.off }"
+                        :disabled="busy !== ''" :title="c.off ? `${c.ticker} 已排除，点一下恢复` : `点一下排除 ${c.ticker}`"
+                        @click="toggleExcluded(g, c.ticker)">{{ c.ticker }}{{ c.qty == null ? "" : ` ${c.qty}` }}</button>
+              </div>
+              <div v-if="chipsOf(g).length" class="dim">
+                {{ g.excluded?.length ? `已排除 ${g.excluded.join("、")}，装卸时不算。` : "点一下材料可以把它排除。" }}</div>
               <div class="btns">
                 <button v-if="g.resupply" type="button" :disabled="busy !== ''" @click="refreshGroup(g)">更新</button>
                 <button type="button" title="复制这个材料组的 json" @click="copyGroup(g)">复制</button>
                 <button type="button" @click="download(`group-${safeName(g.name)}.json`, g)">存成文件</button>
+                <button type="button" title="粘贴一段 json，换掉这个组的内容；名字不变，路线里用到它的步骤跟着变"
+                        @click="overrideOpen = !overrideOpen">用 json 覆盖…</button>
                 <button type="button" class="danger" @click="removeGroup(g)">移除</button>
               </div>
+              <template v-if="overrideOpen">
+                <textarea v-model="overrideText" rows="6" spellcheck="false"
+                          placeholder='材料组的 json、只有一个组的 XIT ACT 包，或 { "RAT": 300, "DW": 400 }' />
+                <button type="button" class="primary" :disabled="!overrideText.trim()" @click="overrideGroup(g)">覆盖这个组</button>
+              </template>
             </div>
           </li>
         </ul>
@@ -729,8 +783,9 @@ ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: col
 .paste, .acct { padding: 6px 0 0; }
 .days { width: 60px; text-align: right; }
 .chips { display: flex; flex-wrap: wrap; gap: 3px; }
-.chips i { font-style: normal; background: #2a2e38; color: #c5ccd8; padding: 0 5px; border-radius: 3px;
-           font-variant-numeric: tabular-nums; }
+.chips .chip { background: #2a2e38; color: #c5ccd8; border: 0; padding: 0 5px; border-radius: 3px;
+               font-variant-numeric: tabular-nums; }
+.chips .chip.off { background: none; color: #6b7280; text-decoration: line-through; box-shadow: inset 0 0 0 1px #3a4050; }
 .btns { display: flex; gap: 4px; flex-wrap: wrap; }
 .wide { width: 100%; margin-top: 6px; }
 .tip { margin: 4px 0; line-height: 1.5; }

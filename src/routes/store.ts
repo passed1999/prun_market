@@ -69,10 +69,28 @@ export function upsertRoute(route: RouteDoc) {
   workspace.activeRouteId = route.id;
 }
 
-export function upsertGroup(group: MaterialGroup) {
-  const i = workspace.groups.findIndex((g) => g.id === group.id);
-  if (i >= 0) workspace.groups[i] = group;
-  else workspace.groups.push(group);
+/**
+ * 载入一批材料组，返回覆盖了几个已有的。
+ * 同 id 的直接替换；id 对不上（ACT 包每次导入 id 都是新的）但原来恰好有一个同名的，
+ * 就覆盖那一个并沿用它的 id，路线里的引用不会断。只跟载入前就有的组比名字，同一批里重名的各自保留。
+ */
+export function upsertGroups(groups: MaterialGroup[]): number {
+  const before = [...workspace.groups];
+  let replaced = 0;
+  for (const group of groups) {
+    let i = workspace.groups.findIndex((g) => g.id === group.id);
+    if (i < 0) {
+      const same = before.filter((g) => g.name === group.name);
+      if (same.length === 1) {
+        before.splice(before.indexOf(same[0]), 1);
+        group.id = same[0].id;
+        i = workspace.groups.findIndex((g) => g.id === group.id);
+      }
+    }
+    if (i >= 0) { workspace.groups[i] = group; replaced++; }
+    else workspace.groups.push(group);
+  }
+  return replaced;
 }
 
 /**
