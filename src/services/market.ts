@@ -58,7 +58,7 @@ interface GameRef {
   buildingCosts: Set<string>;
 }
 
-async function gameRef(): Promise<GameRef> {
+export async function gameRef(): Promise<GameRef> {
   const [materials, recipes, needs, buildings] = await Promise.all([
     fio.materials(), fio.recipes(), fio.workforceNeeds(), fio.buildings(),
   ]);

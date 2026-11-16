@@ -36,6 +36,7 @@ const SOURCES: Record<string, Source> = {
       [/^\/recipes\/allrecipes$/, STATIC],
       [/^\/global\/workforceneeds$/, STATIC],
       [/^\/planet\/allplanets$/, STATIC],
+      [/^\/csv\/planetresources$/, STATIC],
       [/^\/exchange\/station$/, STATIC],
       [/^\/planet\/[A-Z]{2}-\d{3}[a-z]$/, STATIC],
       [/^\/systemstars$/, STATIC],

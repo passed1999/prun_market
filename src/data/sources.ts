@@ -6,7 +6,7 @@
  *   pp     api.prunplanner.org     公开行情（vwap_7d / vwap_30d / 日成交）
  *   stats  prun.raylu.net/stats    月度全服产量与公司榜（PMMG 的 PrUn Financial Reports，MIT）
  */
-import { getJson } from "../api/client";
+import { getJson, getText } from "../api/client";
 import type {
   FioBuilding, FioExchangeFullRow, FioExchangeRow, FioMaterial, FioPlanetName, FioPlanetOrbit, FioRecipe,
   FioSystemStar, FioStation,
@@ -54,7 +54,37 @@ function slimFull(raw: unknown): SlimExchangeRow[] {
   }));
 }
 
+/** 资源在星球上的形态，决定用哪种采集建筑 */
+export type ResourceForm = "MINERAL" | "LIQUID" | "GASEOUS";
+/** ticker → 形态 → 各星球的浓度（0–1），由高到低，只留前 50 颗 */
+export type PlanetResources = Record<string, Partial<Record<ResourceForm, number[]>>>;
+
+const RESOURCE_KEEP = 50;
+
+/** /csv/planetresources：Key,Planet,Ticker,Type,Factor */
+function parsePlanetResources(csv: string): PlanetResources {
+  const out: PlanetResources = {};
+  for (const line of csv.split("\n").slice(1)) {
+    const [, , ticker, form, factor] = line.split(",");
+    const value = Number(factor);
+    if (!ticker || !(value > 0)) continue;
+    if (form !== "MINERAL" && form !== "LIQUID" && form !== "GASEOUS") continue;
+    ((out[ticker] ??= {})[form] ??= []).push(value);
+  }
+  for (const forms of Object.values(out)) {
+    for (const form of Object.keys(forms) as ResourceForm[]) {
+      forms[form] = forms[form]!.sort((a, b) => b - a).slice(0, RESOURCE_KEEP);
+    }
+  }
+  return out;
+}
+
+let planetResources: Promise<PlanetResources> | null = null;
+
 export const fio = {
+  planetResources: () => planetResources ??= getText("/api/fio/csv/planetresources")
+    .then(parsePlanetResources)
+    .catch((e) => { planetResources = null; throw e; }),
   materials: () => cached<FioMaterial[]>("/api/fio/material/allmaterials"),
   buildings: () => cached<FioBuilding[]>("/api/fio/building/allbuildings"),
   recipes: () => cached<FioRecipe[]>("/api/fio/recipes/allrecipes"),

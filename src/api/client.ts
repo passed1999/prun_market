@@ -28,7 +28,7 @@ async function errorMessage(resp: Response): Promise<string> {
 // 冷缓存时 5.6MB 的行情要从上游拉一遍，90 秒够用
 const TIMEOUT_MS = 90_000;
 
-export async function getJson<T>(path: string, force = false): Promise<T> {
+async function request(path: string, force: boolean): Promise<Response> {
   let resp: Response;
   try {
     resp = await fetch(force ? `${path}?force=1` : path, {
@@ -42,5 +42,14 @@ export async function getJson<T>(path: string, force = false): Promise<T> {
     throw new ApiError(0, "连接不上数据服务，请稍后重试。");
   }
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
-  return resp.json();
+  return resp;
+}
+
+export async function getJson<T>(path: string, force = false): Promise<T> {
+  return (await request(path, force)).json();
+}
+
+/** 上游给的不是 JSON 的接口（FIO 的 /csv/*）*/
+export async function getText(path: string, force = false): Promise<string> {
+  return (await request(path, force)).text();
 }
