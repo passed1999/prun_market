@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "PrUn Price Guard",
+  "version": "0.4.0",
+  "description": "Prosperous Universe：买单限价比参考价（Refined PrUn Price）高出设定的阈值时拦截并提醒；用 XIT SET-PRICE-GUARD 设置阈值。",
+  "minimum_chrome_version": "121",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "prun-price-guard@prun-market",
+      "strict_min_version": "127.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://apex.prosperousuniverse.com/*",
+    "https://refined-prun.github.io/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["core.js", "background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://apex.prosperousuniverse.com/*"],
+      "js": ["core.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

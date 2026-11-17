@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Price Guard 模拟页面</title>
+<!--
+  不登录游戏也能试扩展：照游戏的 class 名搭了 CXPO 与 XIT 窗口的骨架，扩展 API 用 localStorage 顶替。
+  地址后加 #rprun 会模拟 rprun 同时在场（往不认识的 XIT 窗口里写报错、CXPO 限价占位符为 Auto）。
+  参考价是真的从 refined-prices 取的。
+-->
+<link rel="stylesheet" href="../price-guard/content.css">
+<style>
+  body { background: #0f1216; color: #ccc; font: 12px sans-serif; margin: 12px; }
+  .Window__window___x { display: inline-block; vertical-align: top; width: 420px; margin: 6px; border: 1px solid #3a4250; background: #222831; }
+  .TileFrame__header___x { display: flex; gap: 8px; padding: 4px 6px; background: #2d3541; }
+  .TileFrame__cmd___x { color: #f7a600; }
+  .TileFrame__anchor___x { min-height: 120px; }
+  form { padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  form > div { display: flex; gap: 8px; align-items: center; }
+  form label { width: 90px; }
+  .Button__success___x { background: #5cb85c; border: 0; padding: 4px 16px; }
+  .Button__danger___x { background: #d9534f; border: 0; padding: 4px 16px; }
+  #log { white-space: pre-wrap; color: #9fdc9f; }
+</style>
+</head>
+<body>
+<div>
+  <input id="cmd" value="XIT SET-PRICE-GUARD REL 15" size="30"> <button id="open">打开窗口</button>
+  <span>已下的买单：<b id="count">0</b></span>
+</div>
+<div id="log"></div>
+<div id="desk"></div>
+
+<script>
+  // 扩展 API 的替身
+  (function () {
+    const listeners = [];
+    const read = () => JSON.parse(localStorage.getItem("pg-mock") || "{}");
+    window.__pgExt = {
+      storage: {
+        local: {
+          async get(keys) { const all = read(); const out = {}; for (const k of [].concat(keys)) if (k in all) out[k] = all[k]; return out; },
+          async set(items) {
+            const all = read(); const changes = {};
+            for (const k in items) { changes[k] = { oldValue: all[k], newValue: JSON.parse(JSON.stringify(items[k])) }; all[k] = items[k]; }
+            localStorage.setItem("pg-mock", JSON.stringify(all));
+            listeners.forEach((l) => l(changes, "local"));
+          },
+        },
+        onChanged: { addListener: (l) => listeners.push(l) },
+      },
+      runtime: { sendMessage: async () => { throw new Error("模拟页面没有后台"); } },
+    };
+  })();
+
+  window.mockRprun = /rprun/.test(location.search + location.hash);
+  const isRprun = () => window.mockRprun;
+  let nextId = 1;
+  function openTile(command, id) {
+    const win = document.createElement("div");
+    win.className = "Window__window___x";
+    const isXit = /^XIT\b/i.test(command);
+    win.innerHTML = `
+      <div data-prun-id="${id || "tile-" + nextId++}">
+        <div class="TileFrame__frame___x">
+          <div class="TileFrame__header___x"><span class="TileFrame__cmd___x"></span><span class="TileFrame__title___x">${isXit ? "" : "Place order"}</span></div>
+          <div class="TileFrame__anchor___x">${isXit
+            ? `<div class="ScrollView__view___x"><div style="background:#0f0;width:100%;height:120px"></div></div>`
+            : `<form class="ComExPlaceOrderForm__form___x">
+                <div><label>Quantity</label><input value="100"></div>
+                <div><label>Price Limit</label><input value="" placeholder="${isRprun() ? "Auto" : ""}"></div>
+                <div><button type="button" class="Button__btn___x Button__success___x">BUY</button>
+                     <button type="button" class="Button__btn___x Button__danger___x">SELL</button></div>
+              </form>`}
+          </div>
+        </div>
+      </div>`;
+    win.querySelector('[class*="TileFrame__cmd"]').textContent = command;
+    document.getElementById("desk").appendChild(win);
+    const buy = win.querySelector(".Button__success___x");
+    if (buy) buy.addEventListener("click", () => {
+      const price = win.querySelectorAll("input")[1];
+      if (isRprun() && price.value === "") { price.value = "25.70"; return; } // rprun 的自动限价：先填价，不下单
+      document.getElementById("count").textContent = String(Number(document.getElementById("count").textContent) + 1);
+      document.getElementById("log").textContent += `下单：${command} 数量 ${win.querySelectorAll("input")[0].value} 限价 ${price.value}\n`;
+    });
+    if (isRprun() && isXit) setTimeout(() => {
+      const c = win.querySelector('[class*="ScrollView__view"]').children[0];
+      c.removeAttribute("style");
+      c.textContent = "Error! No Matching Function!";
+    }, 300);
+    return win;
+  }
+  document.getElementById("open").onclick = () => openTile(document.getElementById("cmd").value.trim());
+  openTile("CXPO NA.NC1", "tile-cxpo");
+</script>
+<script src="../price-guard/core.js"></script>
+<script src="../price-guard/content.js"></script>
+</body>
+</html>

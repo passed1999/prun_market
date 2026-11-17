@@ -5,3 +5,4 @@ dist/
 .dev.vars
 scripts/check_port/fixtures/
 scripts/check_port/out/
+extension/dist/

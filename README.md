@@ -22,6 +22,7 @@ src/routes/          路线编辑器：数据模型、展开与检查（compile.
 src/contracts/       合同生成：从 json 里找材料清单（parse.ts）、写 ACT 包与合同 json（build.ts）
 src/views/           五个页面
 public/prun-route-loader.user.js  游戏内的用户脚本：读入导出的路线，在 RT 界面上每点一下执行一步
+extension/price-guard/  独立的浏览器扩展：买单限价比参考价高出阈值时拦截并提醒（见 extension/README.md）
 ```
 
 所有计算放在浏览器里，是因为免费档 Worker 每次请求只有 10ms CPU，解析 5.6MB 的行情就会超。
