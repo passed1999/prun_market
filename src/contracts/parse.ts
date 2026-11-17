@@ -85,6 +85,8 @@ function walk(node: unknown, name: string, out: MaterialSource[], depth: number)
   const own = typeof node.name === "string" && node.name ? node.name : "";
   for (const [key, child] of Object.entries(node)) {
     if (typeof child !== "object" || child === null) continue;
+    // CX Buy 的限价表长得跟「材料: 数量」一样，但不是清单
+    if (key === "priceLimits") continue;
     // 「materials」这种键本身没信息量，用所在对象的名字
     const label = key === "materials" || key === "Materials" ? (own || name) : (own ? `${own} / ${key}` : key);
     walk(child, label, out, depth + 1);

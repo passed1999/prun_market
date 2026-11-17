@@ -65,6 +65,8 @@ export interface ActionForm {
   // MTRA
   origin: string;
   dest: string;
+  /** 装上船之后不自动打开飞行控制（SFC） */
+  noSfc: boolean;
   // CONT Ship / CONT Trade
   currency: string;
   daysToFulfill: number;
@@ -80,15 +82,10 @@ export function newAction(type: ActionType, id: string, currency = "AIC"): Actio
   return {
     id, type,
     exchange: CONFIGURE, useCXInv: true, buyPartial: false, allowUnfilled: false, priceLimits: false,
-    origin: CONFIGURE, dest: CONFIGURE,
+    origin: CONFIGURE, dest: CONFIGURE, noSfc: true,
     currency, daysToFulfill: 3, contOrigin: CONFIGURE, contDest: CONFIGURE, paymentPerTon: 0, autoProvision: false,
     contTradeType: "BUYING", contLocation: CONFIGURE,
   };
-}
-
-/** 包里的名字只用英文字母、数字和连字符：插件遇到别的字符会出问题 */
-export function ascii(text: string): string {
-  return text.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 const days = (v: number) => Math.min(MAX_DAYS, Math.max(MIN_DAYS, Math.round(Number(v)) || 3));
@@ -109,8 +106,9 @@ export interface Built {
 
 export function buildActPack(lines: Line[], o: ActPackOptions): Built {
   const warnings: string[] = [];
-  const name = ascii(o.name) || "contract";
-  const group = ascii(o.groupName) || "materials";
+  // 名字原样保留：PRUNplanner 导出的包名本来就带空格（"PRUNplanner Supply Cart"）
+  const name = o.name.trim() || "contract";
+  const group = o.groupName.trim() || "materials";
   if (!lines.length) warnings.push("材料清单是空的。");
 
   const unpriced = lines.filter((l) => l.price === undefined).map((l) => l.ticker);
@@ -122,17 +120,17 @@ export function buildActPack(lines: Line[], o: ActPackOptions): Built {
     const base = { type: a.type, name: `${slug}-${n}`, group };
     switch (a.type) {
       case "CX Buy": {
-        const out: Record<string, unknown> = {
-          ...base, exchange: a.exchange || CONFIGURE,
-          useCXInv: a.useCXInv, buyPartial: a.buyPartial, allowUnfilled: a.allowUnfilled,
+        // priceLimits 一律写上（没有限价就是空的），与 PRUNplanner 导出的包同形
+        const limits = a.priceLimits && o.groupType === "Manual"
+          ? Object.fromEntries(lines.filter((l) => l.price !== undefined).map((l) => [l.ticker, l.price]))
+          : {};
+        return {
+          ...base, exchange: a.exchange || CONFIGURE, priceLimits: limits,
+          buyPartial: a.buyPartial, allowUnfilled: a.allowUnfilled, useCXInv: a.useCXInv,
         };
-        if (a.priceLimits && o.groupType === "Manual") {
-          out.priceLimits = Object.fromEntries(lines.filter((l) => l.price !== undefined).map((l) => [l.ticker, l.price]));
-        }
-        return out;
       }
       case "MTRA":
-        return { ...base, origin: a.origin.trim() || CONFIGURE, dest: a.dest.trim() || CONFIGURE };
+        return { ...base, origin: a.origin.trim() || CONFIGURE, dest: a.dest.trim() || CONFIGURE, noSfc: a.noSfc };
       case "CONT Ship":
         return {
           ...base, contOrigin: a.contOrigin.trim() || CONFIGURE, contDest: a.contDest.trim() || CONFIGURE,
@@ -164,6 +162,49 @@ export function buildActPack(lines: Line[], o: ActPackOptions): Built {
     json: { global: { name }, groups, actions },
     paste: o.groupType === "Paste" ? pasteText(lines) : undefined,
     warnings,
+  };
+}
+
+/**
+ * 读回一个 ACT 包里的设置：包名、第一个组的名字与类型、认得的动作。不是 ACT 包时返回 null。
+ * limits 是各个 CX Buy 的 priceLimits 并在一起。
+ */
+export function readActPack(data: unknown, makeId: () => string): (ActPackOptions & { limits: Record<string, number> }) | null {
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!isObj(data) || !isObj(data.global) || typeof data.global.name !== "string" || !Array.isArray(data.actions)) return null;
+  const first = (Array.isArray(data.groups) ? data.groups : []).find(isObj);
+  const text = (v: unknown, fallback: string) => (typeof v === "string" && v.trim() ? v.trim() : fallback);
+  const limits: Record<string, number> = {};
+  const actions: ActionForm[] = [];
+  for (const raw of data.actions) {
+    if (!isObj(raw) || !ACTION_TYPES.includes(raw.type as ActionType)) continue;
+    const a = newAction(raw.type as ActionType, makeId(), text(raw.currency, "AIC"));
+    a.exchange = text(raw.exchange, CONFIGURE);
+    a.useCXInv = raw.useCXInv !== false;
+    a.buyPartial = raw.buyPartial === true;
+    a.allowUnfilled = raw.allowUnfilled === true;
+    if (isObj(raw.priceLimits)) {
+      for (const [t, p] of Object.entries(raw.priceLimits)) {
+        if (Number(p) > 0) { limits[t.trim().toUpperCase()] = Number(p); a.priceLimits = true; }
+      }
+    }
+    a.origin = text(raw.origin, CONFIGURE);
+    a.dest = text(raw.dest, CONFIGURE);
+    a.noSfc = raw.noSfc === true;
+    a.daysToFulfill = days(Number(raw.daysToFulfill));
+    a.contOrigin = text(raw.contOrigin, CONFIGURE);
+    a.contDest = text(raw.contDest, CONFIGURE);
+    a.paymentPerTon = Math.max(0, Number(raw.paymentPerTon) || 0);
+    a.autoProvision = raw.autoProvision === true;
+    a.contTradeType = raw.contTradeType === "SELLING" ? "SELLING" : "BUYING";
+    a.contLocation = text(raw.contLocation, CONFIGURE);
+    actions.push(a);
+  }
+  return {
+    name: data.global.name,
+    groupName: text(first?.name, "materials"),
+    groupType: first?.type === "Paste" ? "Paste" : "Manual",
+    actions, limits,
   };
 }
 

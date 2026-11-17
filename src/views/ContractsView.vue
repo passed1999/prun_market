@@ -10,7 +10,7 @@ import { tickerStyle, useMaterialCategories } from "../api/materials";
 import type { ExchangeCode } from "../api/types";
 import {
   ACTION_TYPES, CONFIGURE, CURRENCIES, EXCHANGE_CURRENCY, MIN_PRICE,
-  buildActPack, buildContract, contractPrice, newAction,
+  buildActPack, buildContract, contractPrice, newAction, readActPack,
   type ActionForm, type ActionType, type ContractType, type Line,
 } from "../contracts/build";
 import { ParseError, extractMaterials, mergeSources, type MaterialSource } from "../contracts/parse";
@@ -50,7 +50,14 @@ function load(): State {
   const empty: State = {
     text: "", rows: [], output: "contract",
     priceMode: "cx", fixed: 100, exchange: "AI1", basis: "ASK", percent: 100,
-    act: { name: "contract", groupName: "materials", groupType: "Manual", actions: [] },
+    // 默认的两个动作与 PRUNplanner 导出的包一样：先在交易所买，再从仓库转到执行时选的地方
+    act: {
+      name: "contract", groupName: "A1", groupType: "Manual",
+      actions: [
+        { ...newAction("CX Buy", newId()), exchange: "AI1" },
+        { ...newAction("MTRA", newId()), origin: "Antares Station Warehouse" },
+      ],
+    },
     contract: {
       type: "SELL", currency: "AIC", deadline: 3, location: "", origin: "", destination: "",
       autoProvision: false, paymentMode: "total", payment: 0,
@@ -59,7 +66,10 @@ function load(): State {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
     if (saved && Array.isArray(saved.rows)) {
-      return { ...empty, ...saved, act: { ...empty.act, ...saved.act }, contract: { ...empty.contract, ...saved.contract } };
+      const act = { ...empty.act, ...saved.act };
+      // 旧版本存下来的动作可能缺后来加的字段
+      act.actions = (Array.isArray(act.actions) ? act.actions : []).map((a: ActionForm) => ({ ...newAction(a.type, a.id), ...a }));
+      return { ...empty, ...saved, act, contract: { ...empty.contract, ...saved.contract } };
     }
   } catch { /* 存坏了：当作空的 */ }
   return empty;
@@ -87,28 +97,45 @@ const sources = ref<MaterialSource[]>([]);
 const chosen = ref<boolean[]>([]);
 const workspaceGroup = ref("");
 
+/** 读入的 ACT 包里 CX Buy 的限价，当作文件自带的价 */
+let packLimits: Record<string, number> = {};
+
 function applySources() {
   const picked = sources.value.filter((_, i) => chosen.value[i]);
   const merged = mergeSources(picked);
   state.rows = Object.entries(merged.materials).map(([ticker, amount]) => ({
-    ticker, amount, filePrice: merged.prices[ticker] ?? null, manual: null,
+    ticker, amount, filePrice: merged.prices[ticker] ?? packLimits[ticker] ?? null, manual: null,
   }));
   if (state.rows.some((r) => r.filePrice !== null)) state.priceMode = "file";
   else if (state.priceMode === "file") state.priceMode = "cx";
-  if (picked.length === 1 && picked[0].name) state.act.name = picked[0].name;
 }
 
 function readText(text: string, name?: string) {
+  // 是 XIT ACT 包的话，连包名、组名和动作一起读回来
+  let pack: ReturnType<typeof readActPack> = null;
+  try { pack = readActPack(JSON.parse(text), newId); } catch { /* 下面会报不是合法的 JSON */ }
+  packLimits = pack?.limits ?? {};
+  if (pack) {
+    state.act = { name: pack.name, groupName: pack.groupName, groupType: pack.groupType, actions: pack.actions };
+    state.output = "act";
+  }
+  const packNote = pack ? `，并读回了 ACT 包「${pack.name}」的 ${pack.actions.length} 个动作` : "";
   try {
     sources.value = extractMaterials(text, name);
   } catch (e) {
+    if (pack && e instanceof ParseError) {
+      // 包里没有材料（比如只有 Paste 组或空的 Manual 组）：动作照样读回来，清单留着原来的
+      sources.value = [];
+      say(`这个包里没有材料清单，材料沿用现有的${packNote}。`);
+      return;
+    }
     say(e instanceof ParseError ? e.message : "读不了这段内容。", true);
     return;
   }
   chosen.value = sources.value.map(() => true);
   applySources();
   const n = sources.value.length;
-  say(n > 1 ? `找到 ${n} 份材料清单，已全部合并；可以在下面取消勾选不要的。` : `读入 ${state.rows.length} 种材料。`);
+  say((n > 1 ? `找到 ${n} 份材料清单，已全部合并，可以在下面取消勾选不要的` : `读入 ${state.rows.length} 种材料`) + `${packNote}。`);
 }
 
 async function onFile(e: Event) {
@@ -244,10 +271,25 @@ function clearManual() { for (const r of state.rows) r.manual = null; }
 
 // ---- 输出 ----
 
+/** 交易所 → 「XX Station Warehouse」，MTRA 的起点用 */
+const warehouses = ref<Record<string, string>>({});
+fio.stations()
+  .then((list) => { warehouses.value = Object.fromEntries(list.map((s) => [s.ComexCode, `${s.Name} Warehouse`])); })
+  .catch(() => { /* 没有就手填 */ });
+
 function addAction(type: ActionType) {
-  state.act.actions.push(newAction(type, newId(), state.contract.currency));
+  const action = newAction(type, newId(), state.contract.currency);
+  if (type === "MTRA") {
+    // 前面有定了交易所的 CX Buy：货就在那个站的仓库里
+    const buy = [...state.act.actions].reverse().find((a) => a.type === "CX Buy" && a.exchange !== CONFIGURE);
+    if (buy && warehouses.value[buy.exchange]) action.origin = warehouses.value[buy.exchange];
+  }
+  state.act.actions.push(action);
   if (type === "CONT Trade") state.act.groupType = "Paste";
 }
+
+/** 游戏里的导入框是单行输入框，复制时给不带换行的一行 */
+const compactText = computed(() => JSON.stringify(built.value.json));
 
 const shipPayment = computed(() => (state.contract.paymentMode === "perTon"
   ? Math.round(totals.value.weight * (Number(state.contract.payment) || 0))
@@ -426,7 +468,7 @@ const fmt = (n: number, digits = 2) => n.toLocaleString("en-US", { minimumFracti
         <div v-else>
           <div class="form">
             <label>包名 <input v-model="state.act.name" placeholder="contract"></label>
-            <label>材料组名 <input v-model="state.act.groupName" placeholder="materials"></label>
+            <label>材料组名 <input v-model="state.act.groupName" placeholder="A1"></label>
             <label>材料组类型
               <select v-model="state.act.groupType">
                 <option value="Manual">Manual（数量写在包里）</option>
@@ -461,6 +503,7 @@ const fmt = (n: number, digits = 2) => n.toLocaleString("en-US", { minimumFracti
               <template v-else-if="a.type === 'MTRA'">
                 <label>从 <input v-model="a.origin" list="contract-stores"></label>
                 <label>到 <input v-model="a.dest" list="contract-stores"></label>
+                <label><input v-model="a.noSfc" type="checkbox"> 装上船后不自动打开飞行控制（noSfc）</label>
                 <span class="dim hint">写法：「Montem Base」「Moria Station Warehouse」「船名 Cargo」；两头要在同一个地点。</span>
               </template>
               <template v-else>
@@ -497,7 +540,7 @@ const fmt = (n: number, digits = 2) => n.toLocaleString("en-US", { minimumFracti
         </ul>
 
         <div class="bar">
-          <button type="button" class="primary" @click="copy(outputText, 'json ')">复制 json</button>
+          <button type="button" class="primary" @click="copy(compactText, 'json ')">复制 json</button>
           <button type="button" @click="save">存成文件</button>
         </div>
         <textarea class="output" readonly spellcheck="false" :value="outputText" rows="16" />
@@ -532,6 +575,7 @@ const fmt = (n: number, digits = 2) => n.toLocaleString("en-US", { minimumFracti
     </datalist>
     <datalist id="contract-stores">
       <option :value="CONFIGURE" />
+      <option v-for="w in warehouses" :key="w" :value="w" />
     </datalist>
   </div>
 </template>
