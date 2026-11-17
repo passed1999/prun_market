@@ -4,6 +4,7 @@ const nav = [
   { to: "/arbitrage", label: "套利" },
   { to: "/profit", label: "面积利润" },
   { to: "/routes", label: "路线编辑" },
+  { to: "/contracts", label: "合同生成" },
 ];
 </script>
 

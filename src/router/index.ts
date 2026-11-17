@@ -8,6 +8,7 @@ export const router = createRouter({
     { path: "/arbitrage", name: "arbitrage", component: () => import("../views/ArbitrageView.vue") },
     { path: "/profit", name: "profit", component: () => import("../views/ProfitView.vue") },
     { path: "/routes", name: "routes", component: () => import("../views/RoutesView.vue") },
+    { path: "/contracts", name: "contracts", component: () => import("../views/ContractsView.vue") },
     { path: "/:pathMatch(.*)*", redirect: "/market" },
   ],
 });

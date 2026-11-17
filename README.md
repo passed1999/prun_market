@@ -7,6 +7,8 @@ Prosperous Universe 的三个公开数据工具，可部署在 Cloudflare Worker
 - **面积利润**：选一种材料，比较所有产出它的配方的每面积日利润与回本天数，可调价反推
 - **路线编辑**：像画流程图一样配置游戏里的 Route（waypoint 与装货 / 卸货 / 加油 / 等待 / 运单步骤），
   可引用材料组与别的 waypoint 的装卸内容，导出时展开成逐材料的步骤交给游戏内脚本
+- **合同生成**：读入任意 json 里的材料清单，按最低价 / 统一价 / 某交易所的卖一、买一、中点、均价、七日均价定价，
+  写成 Refined PrUn 的 XIT ACT 包（CX Buy / MTRA / CONT Ship / CONT Trade）或合同草稿（CONTD）的导入 json
 
 从 [prun_selfplanner](../prun_selfplanner) 剥离而来，算法与原后端逐字段对账一致（见 `scripts/check_port/`）。
 
@@ -17,7 +19,8 @@ worker/index.ts      唯一的服务端代码：白名单代理 + KV 共享缓�
 src/data/sources.ts  三个数据源的取数与瘦身（FIO / PRUNplanner 公开行情 / PrUn Financial Reports）
 src/services/        全部计算（market / arbitrage / profit / prices），在浏览器里跑
 src/routes/          路线编辑器：数据模型、展开与检查（compile.ts）、文件读写；不依赖服务端
-src/views/           四个页面
+src/contracts/       合同生成：从 json 里找材料清单（parse.ts）、写 ACT 包与合同 json（build.ts）
+src/views/           五个页面
 public/prun-route-loader.user.js  游戏内的用户脚本：读入导出的路线，在 RT 界面上每点一下执行一步
 ```
 
