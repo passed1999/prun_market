@@ -15,7 +15,10 @@
  *     系数 = 1 + 基础加成 × (3 − 2 × 已用许可 ÷ 许可总数)，许可总数 = 总部等级 + 1
 
  *
- * 其余口径与「面积利润」页一致（见 profit.ts）：工人消耗按满员全供应、面积只算生产建筑、
+ * 面积与建造成本含住房：按各级工人数配刚好够住的住房（座数可为小数），优先用两级合住的
+ * HBL / HBM / HBC / HBB（每个工人占地更少），配不成对的再用单级的 HB1–HB5。仓库与核心模块不计。
+ *
+ * 其余口径与「面积利润」页一致（见 profit.ts）：工人消耗按满员全供应、
  * 建造成本不含星球环境附加建材。采集日产量 = 浓度 × 70（EXT / RIG）或 × 60（COL），与 buildings.ts 相同。
  *
  * 进出按材料净额算：整条产线里某种材料「产出 − 配方消耗 − 工人消耗」为正就卖、为负就买。
@@ -70,6 +73,30 @@ export function factionFactors(faction: string, level: number, used?: number | n
   const multiplier = 3 - 2 * bases / total;
   return Object.fromEntries(Object.entries(FACTIONS[faction]?.bonus ?? {})
     .map(([expertise, base]) => [expertise, 1 + base * multiplier]));
+}
+
+/** 单级住房：每座住 100 人，下标与 LEVELS 对应 */
+const SINGLE_HOUSING = ["HB1", "HB2", "HB3", "HB4", "HB5"];
+const SINGLE_CAPACITY = 100;
+/** 两级合住：相邻两级各住 75 人。[建筑, 低的那一级的下标]，按省地多少排（HBL 省得最多）*/
+const MIXED_HOUSING: [string, number][] = [["HBL", 3], ["HBM", 2], ["HBC", 1], ["HBB", 0]];
+const MIXED_CAPACITY = 75;
+
+/** 各级工人数（下标同 LEVELS）→ 占地最小的住房配置。相邻两级能配对的都合住，从高级往低级配 */
+function housingFor(workers: number[]): { ticker: string; count: number }[] {
+  const left = [...workers];
+  const out: { ticker: string; count: number }[] = [];
+  for (const [ticker, low] of MIXED_HOUSING) {
+    const paired = Math.min(left[low], left[low + 1]);
+    if (paired <= 0) continue;
+    left[low] -= paired;
+    left[low + 1] -= paired;
+    out.push({ ticker, count: paired / MIXED_CAPACITY });
+  }
+  left.forEach((n, i) => {
+    if (n > 1e-9) out.push({ ticker: SINGLE_HOUSING[i], count: n / SINGLE_CAPACITY });
+  });
+  return out;
 }
 
 export const BUY = "BUY";
@@ -179,9 +206,14 @@ export interface ChainResult {
   edges: ChainEdge[];
   flows: ChainFlow[];
   buildings: ChainBuilding[];
+  /** 住这些工人要的住房；makes 为空 */
+  housing: ChainBuilding[];
   /** 各级工人数 */
   workers: { level: string; count: number }[];
+  /** 总面积 = 生产（含采集）+ 住房 */
   area: number;
+  production_area: number;
+  housing_area: number;
   unstable: boolean;
 }
 
@@ -413,11 +445,16 @@ export function compute(data: ChainData, config: ChainConfig, prices: ChainPrice
     if (Math.abs(f.net) < 1e-9 * Math.max(1, f.produced, f.consumed)) f.net = 0;
   }
 
+  const housing: ChainBuilding[] = housingFor(LEVELS.map(([level]) => workers.get(level) ?? 0))
+    .map(({ ticker, count: n }) => ({ ticker, count: n, area: n * (data.buildings.get(ticker)?.AreaCost ?? 0), makes: [] }));
+  const housingArea = housing.reduce((s, h) => s + h.area, 0);
+
   return {
-    nodes, edges, flows,
+    nodes, edges, flows, housing,
+    production_area: area, housing_area: housingArea,
     buildings: [...byBuilding.values()].sort((a, b) => b.area - a.area),
     workers: LEVELS.map(([level]) => ({ level, count: workers.get(level) ?? 0 })).filter((w) => w.count),
-    area, unstable,
+    area: area + housingArea, unstable,
   };
 }
 
@@ -466,7 +503,7 @@ export function summarize(data: ChainData, result: ChainResult, prices: ChainPri
 
   let buildCost = 0;
   const buildUnpriced = new Set<string>();
-  for (const b of result.buildings) {
+  for (const b of [...result.buildings, ...result.housing]) {
     for (const c of data.buildings.get(b.ticker)?.BuildingCosts ?? []) {
       const p = prices.buy[c.CommodityTicker];
       if (p == null) buildUnpriced.add(c.CommodityTicker);

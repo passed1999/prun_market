@@ -425,7 +425,10 @@ function nodeNote(n: ChainNode): string {
       <div><dt>日利润</dt><dd :class="money.profit >= 0 ? 'long' : 'short'">{{ num(money.profit) }}</dd></div>
       <div><dt>日收入</dt><dd>{{ num(money.revenue) }}</dd></div>
       <div><dt>日成本</dt><dd>{{ num(money.cost) }}</dd></div>
-      <div><dt>总面积</dt><dd>{{ num(result.area, 1) }}</dd></div>
+      <div :title="`生产 ${num(result.production_area, 1)} + 住房 ${num(result.housing_area, 1)}`">
+        <dt>总面积（含住房）</dt>
+        <dd>{{ num(result.area, 1) }} <span class="dim">= {{ num(result.production_area, 1) }} + {{ num(result.housing_area, 1) }}</span></dd>
+      </div>
       <div><dt>建造成本</dt><dd>{{ num(money.build_cost) }}</dd></div>
       <div><dt>回本天数</dt><dd>{{ num(money.payback, 1) }}</dd></div>
       <div v-for="w in result.workers" :key="w.level">
@@ -529,6 +532,12 @@ function nodeNote(n: ChainNode): string {
                 <span v-for="t in b.makes" :key="t" class="tag small" :style="tagStyle(t)">{{ t }}</span>
               </td>
             </tr>
+            <tr v-for="b in result.housing" :key="b.ticker">
+              <td class="left">{{ b.ticker }}</td>
+              <td>{{ num(b.count, 2) }}</td>
+              <td>{{ num(b.area, 1) }}</td>
+              <td class="left dim">住房</td>
+            </tr>
             <tr class="total"><td class="left" colspan="2">合计</td><td>{{ num(result.area, 1) }}</td><td /></tr>
           </tbody>
         </table>
@@ -553,7 +562,8 @@ function nodeNote(n: ChainNode): string {
       <li>采集日产量 = 星球浓度 × 70（EXT / RIG）或 × 60（COL），再乘效率。</li>
       <li>进出按整条产线的净额算：副产物先抵掉产线内部（含工人）对它的消耗，剩下的才卖。</li>
       <li>工人消耗按建筑满员、必需品与两种奢侈品全部供应计，一律算作买入。</li>
-      <li>面积只含生产与采集建筑，不含住房、仓库；建造成本不含星球环境附加建材；回本天数 = 建造成本 ÷ 日利润。</li>
+      <li>面积与建造成本含住房：按各级工人数配刚好够住的住房（座数可为小数），相邻两级能配对的用合住的 HBL / HBM / HBC / HBB（各住 75 + 75 人，人均占地更少），剩下的用单级 HB1–HB5（每座 100 人）。不含仓库与核心模块。</li>
+      <li>建造成本不含星球环境附加建材；回本天数 = 建造成本 ÷ 日利润。</li>
       <li>价格口径与「面积利润」页相同：买一价、卖一价、均价取自 FIO 当前行情；7 日、30 日均价与全服均价取自 PRUNplanner。</li>
       <li>「批量设置」的规则对所有产品的产线生效；节点上单独选的来源优先于规则。设置都记在本浏览器里。</li>
       <li>不含手续费与运输成本。</li>
