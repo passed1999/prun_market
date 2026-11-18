@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PrUn Route Loader
 // @namespace    prun-market
-// @version      0.6.0
+// @version      0.6.1
 // @description  把路线编辑器导出的 json 半自动配置到游戏里的 RT（每点一下执行一步）
 // @match        https://apex.prosperousuniverse.com/*
 // @grant        none
@@ -500,7 +500,7 @@
   #prl h4 .dim{flex:1;text-align:right;font-weight:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #prl h4 .min{padding:0 8px;line-height:16px;font-weight:bold}
   #prl textarea{width:100%;box-sizing:border-box;background:#14171c;color:#ddd;border:1px solid #555;font:11px monospace;resize:vertical}
-  #prl [hidden]{display:none!important}
+  #prl[hidden],#prl [hidden]{display:none!important}
   #prl button,#prl select{background:#2b3038;color:#eee;border:1px solid #555;padding:3px 8px;font-size:12px;cursor:pointer}
   #prl select{width:100%}
   #prl button.go{background:#f7a600;color:#222;border-color:#f7a600;font-weight:bold;padding:6px 8px;flex:1}
