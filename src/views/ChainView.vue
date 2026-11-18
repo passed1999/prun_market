@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, reactive, ref, shallowRef, watch } from 
 import { errorText } from "../api/client";
 import { categoryColor, categoryLabel, categoryTextColor } from "../api/materials";
 import * as chain from "../services/chain";
-import { BUY, EXTRACT, FORM_LABEL } from "../services/chain";
+import { BUY, EXPERTISE_LABEL, EXTRACT, FACTIONS, FORM_LABEL, FULL_EFFICIENCY } from "../services/chain";
 import { EXCHANGES } from "../services/prices";
 import type { ChainNode, ChainRule, ChainSource, NodeSetting } from "../services/chain";
 import type { ExchangeCode, PriceSource } from "../api/types";
@@ -20,15 +20,20 @@ const LEVEL_LABEL: Record<string, string> = {
 
 const STORE_KEY = "prun-market.chain.v1";
 interface Pref { exchange: ExchangeCode; price_source: PriceSource }
+/** 总部：派系（空 = 不加成）、等级、已建基地数（空 = 许可全部用完）*/
+interface Hq { faction: string; level: number; bases: number | null }
 interface Saved {
   buy: Pref; sell: Pref; last: string;
+  /** 全局效率，百分数 */
+  efficiency: number;
+  hq: Hq;
   rules: Record<string, ChainRule>;
   chains: Record<string, { count: number; nodes: Record<string, NodeSetting> }>;
 }
 function loadSaved(): Saved {
   const fallback: Saved = {
     buy: { exchange: "NC1", price_source: "ASK" }, sell: { exchange: "NC1", price_source: "BID" },
-    last: "", rules: {}, chains: {},
+    last: "", efficiency: 100, hq: { faction: "", level: 1, bases: null }, rules: {}, chains: {},
   };
   try {
     const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? "null");
@@ -37,6 +42,11 @@ function loadSaved(): Saved {
     return {
       buy: ok(raw.buy) ? raw.buy : fallback.buy, sell: ok(raw.sell) ? raw.sell : fallback.sell,
       last: typeof raw.last === "string" ? raw.last : "",
+      efficiency: typeof raw.efficiency === "number" && raw.efficiency > 0 ? raw.efficiency : 100,
+      hq: raw.hq && typeof raw.hq === "object" && (raw.hq.faction === "" || raw.hq.faction in FACTIONS)
+        ? { faction: raw.hq.faction, level: Number(raw.hq.level) || 1,
+            bases: typeof raw.hq.bases === "number" ? raw.hq.bases : null }
+        : fallback.hq,
       rules: raw.rules && typeof raw.rules === "object" ? raw.rules : {},
       chains: raw.chains && typeof raw.chains === "object" ? raw.chains : {},
     };
@@ -48,6 +58,15 @@ const saved = loadSaved();
 const buy = reactive<Pref>(saved.buy);
 const sell = reactive<Pref>(saved.sell);
 const rules = reactive<Record<string, ChainRule>>(saved.rules);
+/** 全局效率，百分数 */
+const efficiency = ref(saved.efficiency);
+const hq = reactive<Hq>(saved.hq);
+const hqTotal = computed(() => chain.hqPermits(Number(hq.level)));
+const hqBases = computed(() => typeof hq.bases === "number" && hq.bases >= 1 ? hq.bases : null);
+const factors = computed(() => hq.faction ? chain.factionFactors(hq.faction, Number(hq.level), hqBases.value) : {});
+const factorText = computed(() => Object.entries(factors.value)
+  .map(([e, k]) => `${EXPERTISE_LABEL[e] ?? e} +${((k - 1) * 100).toFixed(1)}%`).join("，"));
+const FULL_PCT = Math.round(FULL_EFFICIENCY * 1000) / 10;
 
 const ticker = ref(saved.last);
 /** 当前展开的产品；空 = 还没算 */
@@ -60,13 +79,14 @@ const prices = shallowRef<chain.ChainPrices | null>(null);
 const error = ref("");
 const busy = ref(false);
 
-watch([buy, sell, rules, root, count, nodes], () => {
+watch([buy, sell, rules, root, count, nodes, efficiency, hq], () => {
+  if (Number(efficiency.value) > 0) saved.efficiency = Number(efficiency.value);
   if (root.value) {
     saved.last = root.value;
     saved.chains[root.value] = { count: count.value, nodes: JSON.parse(JSON.stringify(nodes)) };
   }
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({ ...saved, buy, sell, rules }));
+    localStorage.setItem(STORE_KEY, JSON.stringify({ ...saved, buy, sell, rules, hq }));
   } catch { /* 隐私模式 */ }
 }, { deep: true });
 
@@ -131,7 +151,8 @@ const solved = computed(() => {
   if (!data.value || !prices.value || !root.value) return null;
   try {
     const result = chain.compute(data.value,
-      { root: root.value, count: Number(count.value) || 0, nodes, rules }, prices.value);
+      { root: root.value, count: Number(count.value) || 0, efficiency: (Number(efficiency.value) || 100) / 100,
+        factors: factors.value, nodes, rules }, prices.value);
     return { result, money: chain.summarize(data.value, result, prices.value), error: "" };
   } catch (e) {
     return { result: null, money: null, error: errorText(e) };
@@ -328,6 +349,33 @@ function nodeNote(n: ChainNode): string {
       最终建筑
       <input v-model.number="count" type="number" min="0" step="1" style="width:64px" /> 座
     </label>
+    <span class="group">
+      <label title="每座建筑每天的投入与产出都乘这个系数；面积与工人消耗不变">
+        效率
+        <input v-model.number="efficiency" type="number" min="1" step="any" style="width:68px" /> %
+      </label>
+      <button type="button" :class="{ on: efficiency === 100 }" @click="efficiency = 100">基础 100%</button>
+      <button type="button" :class="{ on: efficiency === FULL_PCT }" title="CoGC ×1.25，5 名专家 ×1.284"
+              @click="efficiency = FULL_PCT">CoGC + 满专家 {{ FULL_PCT }}%</button>
+    </span>
+    <span class="group">
+      <label title="总部所在星域的派系，给对应专业的建筑加效率，与上面的效率相乘">
+        总部派系
+        <select v-model="hq.faction">
+          <option value="">不加成</option>
+          <option v-for="(f, id) in FACTIONS" :key="id" :value="id">{{ f.label }}</option>
+        </select>
+      </label>
+      <template v-if="hq.faction">
+        <label>等级 <input v-model.number="hq.level" type="number" min="1" max="50" step="1" style="width:54px" /></label>
+        <label :title="`总部 ${hq.level} 级共 ${hqTotal} 个基地许可；基地越少加成越高。留空 = 许可全部用完`">
+          基地数
+          <input v-model.number="hq.bases" type="number" min="1" :max="hqTotal" step="1" :placeholder="String(hqTotal)"
+                 style="width:54px" /> / {{ hqTotal }}
+        </label>
+        <span class="dim">{{ factorText }}</span>
+      </template>
+    </span>
     <label>
       卖出
       <select v-model="sell.exchange" @change="reprice()">
@@ -500,7 +548,9 @@ function nodeNote(n: ChainNode): string {
       <li>每种材料在图上只有一个节点，多处用到的需求合在一起。节点来源可选买入、某条配方，或（星球上有的资源）在指定星球采集。</li>
       <li>默认：有配方的材料自产，配方取当前价格下单独看每面积日利润最高的一条；原矿买入。</li>
       <li>自产座数留空时刚好满足需求，可以是小数，面积与工人按小数座数折算；填了座数后，不够的部分买入，多出来的卖出。</li>
-      <li>采集日产量 = 星球浓度 × 70（EXT / RIG）或 × 60（COL），效率 100%。</li>
+      <li>效率是全局系数：每座建筑每天的投入与产出（含采集）都乘它，面积、工人与工人消耗不变。「CoGC + 满专家」= 1.25 × 1.284；工人满意度按 100%，不含总部加成与农田肥力。</li>
+      <li>总部派系加成只给对应专业的建筑，与效率相乘：1 + 基础加成 ×（3 − 2 × 基地数 ÷ 许可总数），许可总数 = 总部等级 + 1。基础加成：AI 电子 10%；CI 制造 10%；IC 农业 6%、食品 4%；NC 冶金 4%、建造 6%；无派系星域化工、燃料精炼、资源采集各 4%。</li>
+      <li>采集日产量 = 星球浓度 × 70（EXT / RIG）或 × 60（COL），再乘效率。</li>
       <li>进出按整条产线的净额算：副产物先抵掉产线内部（含工人）对它的消耗，剩下的才卖。</li>
       <li>工人消耗按建筑满员、必需品与两种奢侈品全部供应计，一律算作买入。</li>
       <li>面积只含生产与采集建筑，不含住房、仓库；建造成本不含星球环境附加建材；回本天数 = 建造成本 ÷ 日利润。</li>
@@ -568,4 +618,6 @@ label { display: inline-flex; gap: 6px; align-items: center; }
 input, select, button { background: #23262e; color: #eee; border: 1px solid #444; padding: 3px 6px; }
 button:not(:disabled) { cursor: pointer; }
 button:disabled { color: #777; }
+button.on { border-color: #9db4d0; color: #fff; background: #2c3140; }
+.group { display: inline-flex; gap: 6px; align-items: center; }
 </style>

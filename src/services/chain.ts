@@ -7,7 +7,15 @@
  *     某条配方      默认按需求算出刚好够的座数（可以是小数）；指定座数后，不够的买入、多出来的卖掉
  *     采集          只对星球上有的资源；座数由所选星球的浓度决定
  *
- * 口径与「面积利润」页一致（见 profit.ts）：效率 100%、工人消耗按满员全供应、面积只算生产建筑、
+ * 效率是一个全局系数：每座建筑每天的投入与产出（含采集）都乘它，面积与工人消耗不变。
+ * CoGC（×1.25）与 5 名专家（×1.284）相乘得 FULL_EFFICIENCY。
+ *
+ * 派系（总部所在地）加成只给对应专业的建筑，与上面的系数相乘（游戏手册 Headquarters 页，
+ * 算法同 PRUNplanner 的 calculateBuildingFactionBonus）：
+ *     系数 = 1 + 基础加成 × (3 − 2 × 已用许可 ÷ 许可总数)，许可总数 = 总部等级 + 1
+
+ *
+ * 其余口径与「面积利润」页一致（见 profit.ts）：工人消耗按满员全供应、面积只算生产建筑、
  * 建造成本不含星球环境附加建材。采集日产量 = 浓度 × 70（EXT / RIG）或 × 60（COL），与 buildings.ts 相同。
  *
  * 进出按材料净额算：整条产线里某种材料「产出 − 配方消耗 − 工人消耗」为正就卖、为负就买。
@@ -30,6 +38,39 @@ const EXTRACTORS: Record<ResourceForm, { building: string; daily: number }> = {
   LIQUID: { building: "RIG", daily: 70 },
 };
 export const FORM_LABEL: Record<ResourceForm, string> = { MINERAL: "固态", GASEOUS: "气态", LIQUID: "液态" };
+
+/** CoGC 加成 */
+export const COGC_FACTOR = 1.25;
+/** 同一专业 5 名专家的加成 */
+export const EXPERT_FACTOR = 1.284;
+export const FULL_EFFICIENCY = COGC_FACTOR * EXPERT_FACTOR;
+
+/** 派系 → 专业 → 基础加成（许可全部用完时的数）*/
+export const FACTIONS: Record<string, { label: string; bonus: Record<string, number> }> = {
+  ANTARES: { label: "Antares Initiative (AI)", bonus: { ELECTRONICS: 0.10 } },
+  BENTEN: { label: "Castillo-Ito Mercantile (CI)", bonus: { MANUFACTURING: 0.10 } },
+  HORTUS: { label: "Insitor Cooperative (IC)", bonus: { AGRICULTURE: 0.06, FOOD_INDUSTRIES: 0.04 } },
+  MORIA: { label: "NEO Charter Exploration (NC)", bonus: { METALLURGY: 0.04, CONSTRUCTION: 0.06 } },
+  OUTSIDEREGION: { label: "无派系星域", bonus: { CHEMISTRY: 0.04, FUEL_REFINING: 0.04, RESOURCE_EXTRACTION: 0.04 } },
+};
+export const EXPERTISE_LABEL: Record<string, string> = {
+  AGRICULTURE: "农业", CHEMISTRY: "化工", CONSTRUCTION: "建造", ELECTRONICS: "电子",
+  FOOD_INDUSTRIES: "食品", FUEL_REFINING: "燃料精炼", MANUFACTURING: "制造", METALLURGY: "冶金",
+  RESOURCE_EXTRACTION: "资源采集",
+};
+
+export function hqPermits(level: number): number {
+  return Math.max(1, Math.floor(level) || 1) + 1;
+}
+
+/** 专业 → 效率系数（1.x）。used 不填按许可全部用完算（加成最低）*/
+export function factionFactors(faction: string, level: number, used?: number | null): Record<string, number> {
+  const total = hqPermits(level);
+  const bases = Math.min(total, Math.max(1, used ?? total));
+  const multiplier = 3 - 2 * bases / total;
+  return Object.fromEntries(Object.entries(FACTIONS[faction]?.bonus ?? {})
+    .map(([expertise, base]) => [expertise, 1 + base * multiplier]));
+}
 
 export const BUY = "BUY";
 export const EXTRACT = "EXTRACT";
@@ -82,6 +123,10 @@ export interface ChainConfig {
   root: string;
   /** 最终产品的建筑座数 */
   count: number;
+  /** 全局生产效率，1 = 100% */
+  efficiency: number;
+  /** 建筑专业 → 额外的效率系数（派系加成），与 efficiency 相乘 */
+  factors?: Record<string, number>;
   nodes: Record<string, NodeSetting>;
   /** 全局规则：某种材料一律买入 / 一律自产（节点上单独选了来源的以节点为准）*/
   rules: Record<string, ChainRule>;
@@ -222,6 +267,16 @@ function bestRecipe(data: ChainData, options: ChainSource[], prices: ChainPrices
 
 export function compute(data: ChainData, config: ChainConfig, prices: ChainPrices): ChainResult {
   const root = config.root;
+  const efficiency = config.efficiency > 0 ? config.efficiency : 1;
+  const scaled = (s: ChainSource | null): ChainSource | null => {
+    if (!s) return s;
+    const k = efficiency * (config.factors?.[data.buildings.get(s.building)?.Expertise ?? ""] ?? 1);
+    return k === 1 ? s : {
+      ...s,
+      inputs: s.inputs.map((l) => ({ ...l, amount: l.amount * k })),
+      outputs: s.outputs.map((l) => ({ ...l, amount: l.amount * k })),
+    };
+  };
 
   interface Resolved { options: ChainSource[]; site: ResourceSite | null; source: ChainSource | null }
   const resolved = new Map<string, Resolved>();
@@ -240,7 +295,7 @@ export function compute(data: ChainData, config: ChainConfig, prices: ChainPrice
     else if (config.rules[ticker] === "buy") source = null;
     else if (config.rules[ticker] === "make") source = anyMake();
     else source = fallback();          // 默认：有配方就自产，原矿买入
-    resolved.set(ticker, r = { options, site, source });
+    resolved.set(ticker, r = { options, site, source: scaled(source) });
     return r;
   };
 

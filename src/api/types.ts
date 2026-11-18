@@ -207,6 +207,8 @@ export interface FioStation {
 export interface FioBuilding {
   Ticker: string;
   Name?: string;
+  /** 专业类别，如 FOOD_INDUSTRIES；住房、仓库等为 null */
+  Expertise?: string | null;
   AreaCost: number;
   Pioneers: number;
   Settlers: number;
