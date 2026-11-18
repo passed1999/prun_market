@@ -28,7 +28,7 @@ function lines(amounts: Record<string, number>): ProfitLine[] {
   return Object.entries(amounts).sort((a, b) => b[1] - a[1]).map(([ticker, amount]) => ({ ticker, amount }));
 }
 
-function workforceDaily(building: FioBuilding, needs: Record<string, Record<string, number>>) {
+export function workforceDaily(building: FioBuilding, needs: Record<string, Record<string, number>>) {
   const out: Record<string, number> = {};
   for (const [level, field] of WORKERS) {
     const count = Number(building[field]) || 0;

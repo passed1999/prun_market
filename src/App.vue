@@ -3,6 +3,7 @@ const nav = [
   { to: "/market", label: "全服市场" },
   { to: "/arbitrage", label: "套利" },
   { to: "/profit", label: "面积利润" },
+  { to: "/chain", label: "产线" },
   { to: "/routes", label: "路线编辑" },
   { to: "/contracts", label: "合同生成" },
 ];

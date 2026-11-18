@@ -79,12 +79,42 @@ function parsePlanetResources(csv: string): PlanetResources {
   return out;
 }
 
+/** 某种资源在某颗星球上的一处矿点 */
+export interface ResourceSite {
+  planet: string;
+  form: ResourceForm;
+  /** 浓度 0–1 */
+  factor: number;
+}
+/** ticker → 所有有这种资源的星球，浓度由高到低 */
+export type ResourceSites = Record<string, ResourceSite[]>;
+
+function parseResourceSites(csv: string): ResourceSites {
+  const out: ResourceSites = {};
+  for (const line of csv.split("\n").slice(1)) {
+    const [, planet, ticker, form, factor] = line.trim().split(",");
+    const value = Number(factor);
+    if (!ticker || !planet || !(value > 0)) continue;
+    if (form !== "MINERAL" && form !== "LIQUID" && form !== "GASEOUS") continue;
+    (out[ticker] ??= []).push({ planet, form, factor: value });
+  }
+  for (const sites of Object.values(out)) sites.sort((a, b) => b.factor - a.factor);
+  return out;
+}
+
+let resourceCsv: Promise<string> | null = null;
+const planetResourceCsv = () => resourceCsv ??= getText("/api/fio/csv/planetresources")
+  .catch((e) => { resourceCsv = null; throw e; });
 let planetResources: Promise<PlanetResources> | null = null;
+let resourceSites: Promise<ResourceSites> | null = null;
 
 export const fio = {
-  planetResources: () => planetResources ??= getText("/api/fio/csv/planetresources")
+  planetResources: () => planetResources ??= planetResourceCsv()
     .then(parsePlanetResources)
     .catch((e) => { planetResources = null; throw e; }),
+  resourceSites: () => resourceSites ??= planetResourceCsv()
+    .then(parseResourceSites)
+    .catch((e) => { resourceSites = null; throw e; }),
   materials: () => cached<FioMaterial[]>("/api/fio/material/allmaterials"),
   buildings: () => cached<FioBuilding[]>("/api/fio/building/allbuildings"),
   recipes: () => cached<FioRecipe[]>("/api/fio/recipes/allrecipes"),
