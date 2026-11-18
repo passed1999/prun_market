@@ -18,6 +18,9 @@
  * 面积与建造成本含住房：按各级工人数配刚好够住的住房（座数可为小数），优先用两级合住的
  * HBL / HBM / HBC / HBB（每个工人占地更少），配不成对的再用单级的 HB1–HB5。仓库与核心模块不计。
  *
+ * 「按整座计」时自动算出的生产建筑座数向上取整（多出来的产能照常生产、富余卖掉），
+ * 住房取住得下所有人、占地最小的整数组合；手动填的座数原样使用。
+ *
  * 其余口径与「面积利润」页一致（见 profit.ts）：工人消耗按满员全供应、
  * 建造成本不含星球环境附加建材。采集日产量 = 浓度 × 70（EXT / RIG）或 × 60（COL），与 buildings.ts 相同。
  *
@@ -82,7 +85,7 @@ const SINGLE_CAPACITY = 100;
 const MIXED_HOUSING: [string, number][] = [["HBL", 3], ["HBM", 2], ["HBC", 1], ["HBB", 0]];
 const MIXED_CAPACITY = 75;
 
-/** 各级工人数（下标同 LEVELS）→ 占地最小的住房配置。相邻两级能配对的都合住，从高级往低级配 */
+/** 各级工人数（下标同 LEVELS）→ 占地最小的住房配置（座数可为小数）。相邻两级能配对的都合住，从高级往低级配 */
 function housingFor(workers: number[]): { ticker: string; count: number }[] {
   const left = [...workers];
   const out: { ticker: string; count: number }[] = [];
@@ -96,6 +99,41 @@ function housingFor(workers: number[]): { ticker: string; count: number }[] {
   left.forEach((n, i) => {
     if (n > 1e-9) out.push({ ticker: SINGLE_HOUSING[i], count: n / SINGLE_CAPACITY });
   });
+  return out;
+}
+
+/**
+ * 同上，但座数只能是整数：住得下所有人、占地最小的组合。
+ * 第 i 级的人住在「i-1 与 i 合住」「i 与 i+1 合住」和单级住房里，所以沿级别做动态规划，
+ * 状态是 i 与 i+1 合住的座数。
+ */
+function wholeHousingFor(workers: number[], areaOf: (ticker: string) => number): { ticker: string; count: number }[] {
+  const mixedAt = (low: number) => MIXED_HOUSING.find(([, l]) => l === low)![0];
+  const last = workers.length - 1;
+  // range[i]：i 与 i+1 合住最多值得建几座
+  const range = workers.map((w, i) => i === last ? 0
+    : Math.min(400, Math.ceil(Math.max(w, workers[i + 1]) / MIXED_CAPACITY - 1e-9)));
+  let prev: { cost: number; mixed: number[]; single: number[] }[] = [{ cost: 0, mixed: [], single: [] }];
+  for (let i = 0; i <= last; i++) {
+    const next: typeof prev = [];
+    for (let b = 0; b <= range[i]; b++) {
+      let best: (typeof prev)[number] | null = null;
+      for (let a = 0; a < prev.length; a++) {
+        const uncovered = workers[i] - MIXED_CAPACITY * (a + b);
+        const single = uncovered > 1e-9 ? Math.ceil(uncovered / SINGLE_CAPACITY - 1e-9) : 0;
+        const cost = prev[a].cost + single * areaOf(SINGLE_HOUSING[i]) + (b ? b * areaOf(mixedAt(i)) : 0);
+        if (!best || cost < best.cost) {
+          best = { cost, mixed: [...prev[a].mixed, b], single: [...prev[a].single, single] };
+        }
+      }
+      next.push(best!);
+    }
+    prev = next;
+  }
+  const { mixed, single } = prev[0];
+  const out: { ticker: string; count: number }[] = [];
+  for (const [ticker, low] of MIXED_HOUSING) if (mixed[low]) out.push({ ticker, count: mixed[low] });
+  single.forEach((n, i) => { if (n) out.push({ ticker: SINGLE_HOUSING[i], count: n }); });
   return out;
 }
 
@@ -152,6 +190,8 @@ export interface ChainConfig {
   count: number;
   /** 全局生产效率，1 = 100% */
   efficiency: number;
+  /** 自动算出的生产建筑与住房都按整座计 */
+  whole?: boolean;
   /** 建筑专业 → 额外的效率系数（派系加成），与 efficiency 相乘 */
   factors?: Record<string, number>;
   nodes: Record<string, NodeSetting>;
@@ -368,6 +408,7 @@ export function compute(data: ChainData, config: ChainConfig, prices: ChainPrice
     const c = config.nodes[ticker]?.count;
     return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : null;
   };
+  const auto = (need: number) => config.whole ? Math.ceil(need - 1e-9) : need;
   const count = new Map<string, number>();
   let demand = new Map<string, number>();
   let unstable = true;
@@ -385,7 +426,7 @@ export function compute(data: ChainData, config: ChainConfig, prices: ChainPrice
       if (!resolve(ticker).source) continue;
       const per = own(ticker);
       const next = ticker === root ? Math.max(0, config.count)
-        : fixedCount(ticker) ?? (per > 0 ? (demand.get(ticker) ?? 0) / per : 0);
+        : fixedCount(ticker) ?? auto(per > 0 ? (demand.get(ticker) ?? 0) / per : 0);
       moved = Math.max(moved, Math.abs(next - (count.get(ticker) ?? 0)) / Math.max(1, next));
       count.set(ticker, next);
     }
@@ -445,7 +486,9 @@ export function compute(data: ChainData, config: ChainConfig, prices: ChainPrice
     if (Math.abs(f.net) < 1e-9 * Math.max(1, f.produced, f.consumed)) f.net = 0;
   }
 
-  const housing: ChainBuilding[] = housingFor(LEVELS.map(([level]) => workers.get(level) ?? 0))
+  const areaOf = (ticker: string) => data.buildings.get(ticker)?.AreaCost ?? 0;
+  const headcount = LEVELS.map(([level]) => workers.get(level) ?? 0);
+  const housing: ChainBuilding[] = (config.whole ? wholeHousingFor(headcount, areaOf) : housingFor(headcount))
     .map(({ ticker, count: n }) => ({ ticker, count: n, area: n * (data.buildings.get(ticker)?.AreaCost ?? 0), makes: [] }));
   const housingArea = housing.reduce((s, h) => s + h.area, 0);
 

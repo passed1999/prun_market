@@ -26,6 +26,7 @@ interface Saved {
   buy: Pref; sell: Pref; last: string;
   /** 全局效率，百分数 */
   efficiency: number;
+  whole: boolean;
   hq: Hq;
   rules: Record<string, ChainRule>;
   chains: Record<string, { count: number; nodes: Record<string, NodeSetting> }>;
@@ -33,7 +34,7 @@ interface Saved {
 function loadSaved(): Saved {
   const fallback: Saved = {
     buy: { exchange: "NC1", price_source: "ASK" }, sell: { exchange: "NC1", price_source: "BID" },
-    last: "", efficiency: 100, hq: { faction: "", level: 1, bases: null }, rules: {}, chains: {},
+    last: "", efficiency: 100, whole: false, hq: { faction: "", level: 1, bases: null }, rules: {}, chains: {},
   };
   try {
     const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? "null");
@@ -43,6 +44,7 @@ function loadSaved(): Saved {
       buy: ok(raw.buy) ? raw.buy : fallback.buy, sell: ok(raw.sell) ? raw.sell : fallback.sell,
       last: typeof raw.last === "string" ? raw.last : "",
       efficiency: typeof raw.efficiency === "number" && raw.efficiency > 0 ? raw.efficiency : 100,
+      whole: raw.whole === true,
       hq: raw.hq && typeof raw.hq === "object" && (raw.hq.faction === "" || raw.hq.faction in FACTIONS)
         ? { faction: raw.hq.faction, level: Number(raw.hq.level) || 1,
             bases: typeof raw.hq.bases === "number" ? raw.hq.bases : null }
@@ -60,6 +62,8 @@ const sell = reactive<Pref>(saved.sell);
 const rules = reactive<Record<string, ChainRule>>(saved.rules);
 /** 全局效率，百分数 */
 const efficiency = ref(saved.efficiency);
+/** 生产建筑与住房都按整座计 */
+const whole = ref(saved.whole);
 const hq = reactive<Hq>(saved.hq);
 const hqTotal = computed(() => chain.hqPermits(Number(hq.level)));
 const hqBases = computed(() => typeof hq.bases === "number" && hq.bases >= 1 ? hq.bases : null);
@@ -79,7 +83,8 @@ const prices = shallowRef<chain.ChainPrices | null>(null);
 const error = ref("");
 const busy = ref(false);
 
-watch([buy, sell, rules, root, count, nodes, efficiency, hq], () => {
+watch([buy, sell, rules, root, count, nodes, efficiency, hq, whole], () => {
+  saved.whole = whole.value;
   if (Number(efficiency.value) > 0) saved.efficiency = Number(efficiency.value);
   if (root.value) {
     saved.last = root.value;
@@ -152,7 +157,7 @@ const solved = computed(() => {
   try {
     const result = chain.compute(data.value,
       { root: root.value, count: Number(count.value) || 0, efficiency: (Number(efficiency.value) || 100) / 100,
-        factors: factors.value, nodes, rules }, prices.value);
+        factors: factors.value, whole: whole.value, nodes, rules }, prices.value);
     return { result, money: chain.summarize(data.value, result, prices.value), error: "" };
   } catch (e) {
     return { result: null, money: null, error: errorText(e) };
@@ -349,6 +354,9 @@ function nodeNote(n: ChainNode): string {
       最终建筑
       <input v-model.number="count" type="number" min="0" step="1" style="width:64px" /> 座
     </label>
+    <label title="自动算出的生产建筑座数向上取整（富余的产出卖掉），住房取住得下所有人、占地最小的整数组合">
+      <input v-model="whole" type="checkbox" /> 按整座计
+    </label>
     <span class="group">
       <label title="每座建筑每天的投入与产出都乘这个系数；面积与工人消耗不变">
         效率
@@ -471,11 +479,11 @@ function nodeNote(n: ChainNode): string {
           </select>
           <div v-if="c.node.source" class="line">
             <input type="number" min="0" step="any" class="count"
-                   :value="c.node.fixed ? c.node.buildings : ''" :placeholder="num(c.node.need, 2)"
+                   :value="c.node.fixed ? c.node.buildings : ''" :placeholder="num(c.node.buildings, 2)"
                    :title="c.node.root ? '最终建筑座数' : '自产建筑座数；留空 = 刚好满足需求'"
                    @change="setCount(c.node, ($event.target as HTMLInputElement).value)" />
             <span>座 {{ c.node.source.building }}</span>
-            <span v-if="!c.node.root && c.node.fixed" class="dim">需 {{ num(c.node.need, 2) }}</span>
+            <span v-if="!c.node.root && Math.abs(c.node.buildings - c.node.need) > 1e-9" class="dim">需 {{ num(c.node.need, 2) }}</span>
           </div>
           <div :class="['note', { warn: c.node.source && c.node.bought > 1e-9 }]">{{ nodeNote(c.node) }}</div>
         </div>
@@ -563,6 +571,7 @@ function nodeNote(n: ChainNode): string {
       <li>进出按整条产线的净额算：副产物先抵掉产线内部（含工人）对它的消耗，剩下的才卖。</li>
       <li>工人消耗按建筑满员、必需品与两种奢侈品全部供应计，一律算作买入。</li>
       <li>面积与建造成本含住房：按各级工人数配刚好够住的住房（座数可为小数），相邻两级能配对的用合住的 HBL / HBM / HBC / HBB（各住 75 + 75 人，人均占地更少），剩下的用单级 HB1–HB5（每座 100 人）。不含仓库与核心模块。</li>
+      <li>勾选「按整座计」后，自动算出的生产建筑座数向上取整，多出来的产能照常生产、富余的卖掉；住房取住得下所有人、占地最小的整数组合。手动填的座数原样使用。</li>
       <li>建造成本不含星球环境附加建材；回本天数 = 建造成本 ÷ 日利润。</li>
       <li>价格口径与「面积利润」页相同：买一价、卖一价、均价取自 FIO 当前行情；7 日、30 日均价与全服均价取自 PRUNplanner。</li>
       <li>「批量设置」的规则对所有产品的产线生效；节点上单独选的来源优先于规则。设置都记在本浏览器里。</li>
