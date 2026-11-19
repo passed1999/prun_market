@@ -18,12 +18,14 @@ const props = defineProps<{
   leg?: LegLoad;
   issues: Issue[];
   loadingProducts?: boolean;
+  filling?: boolean;
 }>();
 const emit = defineEmits<{
   remove: [];
   move: [delta: number];
   size: [height: number];
   products: [];
+  fill: [];
 }>();
 
 const root = ref<HTMLElement | null>(null);
@@ -309,6 +311,9 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
      <button type="button" class="full" :disabled="loadingProducts"
              title="装走这个基地的产物：按 FIO 的数据找出这里净产出的材料，每种加一个装货步骤"
              @click="emit('products')">{{ loadingProducts ? "正在读 FIO…" : "+ 装这个基地的产物" }}</button>
+     <button type="button" class="full" :disabled="filling"
+             title="塞满：按这一站装的补给组（可以有几个）把船舱塞满。先扣掉离开这一站时船上其他货物占的空间，剩下的由这些补给组按同一个天数分掉，取装得下的最大天数。要先填货舱大小"
+             @click="emit('fill')">{{ filling ? "正在算…" : "塞满货舱" }}</button>
    </div>
   </div>
 </template>

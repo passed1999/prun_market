@@ -70,9 +70,11 @@ export function parseFile(text: string, fileName: string): Imported {
       g.resupply = {
         planet: String(r.planet), planetName: String(r.planetName ?? ""),
         days: Math.max(1, Number(r.days) || 30),
-        mode: r.mode === "cargo" ? "cargo" : "days",
+        mode: r.mode === "cargo" || r.mode === "fill" ? r.mode : "days",
         cargoWeight: Number(r.cargoWeight) || undefined, cargoVolume: Number(r.cargoVolume) || undefined,
         fitDays: Number(r.fitDays) || undefined,
+        fillAt: isObj(r.fillAt) && typeof r.fillAt.routeId === "string" && typeof r.fillAt.waypointId === "string"
+          ? { routeId: r.fillAt.routeId, waypointId: r.fillAt.waypointId } : undefined,
         includeLuxuries: r.includeLuxuries !== false, deductStock: r.deductStock !== false,
         updatedAt: Number(r.updatedAt) || 0,
       };

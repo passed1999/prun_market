@@ -11,7 +11,7 @@ import { formatDuration } from "../routes/flight";
 import { GATEWAY_SNAPSHOT } from "../routes/gateways";
 import type { Base } from "../routes/fio";
 import type { Stocks } from "../routes/fio";
-import { account, baseProducts, FioError, listBases, localStocks, resupply } from "../routes/fio";
+import { account, baseProducts, FioError, listBases, localStocks, resupply, resupplyFill } from "../routes/fio";
 import { buildBuyPlan } from "../routes/act";
 import { fio } from "../data/sources";
 import { copyText, download, ImportError, parseFile, parseGroupContent, safeName, toText } from "../routes/io";
@@ -26,13 +26,14 @@ const stocks = ref<Stocks>({});
 const route = computed<RouteDoc>(() =>
   workspace.routes.find((r) => r.id === workspace.activeRouteId) ?? workspace.routes[0]);
 
-const result = computed(() => compile(route.value, workspace.groups, {
+const compileWith = (r: RouteDoc, groups: MaterialGroup[]) => compile(r, groups, {
   mergeAdjacent: workspace.mergeAdjacent,
   shipWeight: workspace.shipWeight,
   shipVolume: workspace.shipVolume,
   materials: materials.value,
   stock: stocks.value,
-}));
+});
+const result = computed(() => compileWith(route.value, workspace.groups));
 
 // ---- 「装满」的步骤装多少：填了 FIO 账号就按当地现在的库存估 ----
 const wantsStocks = computed(() => !!account.username && !!account.apiKey && result.value.game.waypoints
@@ -264,7 +265,7 @@ function toggleExcluded(g: MaterialGroup, ticker: string) {
   const list = g.excluded ?? [];
   const next = list.includes(ticker) ? list.filter((t) => t !== ticker) : [...list, ticker];
   g.excluded = next.length ? next : undefined;
-  if (g.resupply?.mode === "cargo") refreshGroup(g, false);
+  if (g.resupply?.mode === "cargo" || g.resupply?.mode === "fill") refreshGroup(g, false);
 }
 /** 界面上列出来的材料：组里有的，加上被排除、这次重算又没出现的（还得能点回来） */
 function chipsOf(g: MaterialGroup): { ticker: string; qty: number | null; off: boolean }[] {
@@ -361,6 +362,7 @@ function fioFailed(e: unknown) {
 const autoName = (g: MaterialGroup) => {
   const r = g.resupply!;
   const where = r.planetName || r.planet;
+  if (r.mode === "fill") return `${where} 塞满`;
   return r.mode === "cargo" ? `${where} 装满 ${r.cargoWeight ?? 0}t-${r.cargoVolume ?? 0}m3` : `${where} 补到 ${r.days} 天`;
 };
 
@@ -397,7 +399,7 @@ async function addResupplyGroup() {
 }
 /** 名字还是自动起的那个就跟着参数改，用户自己起过名字就不动 */
 function changeSpec(g: MaterialGroup, patch: {
-  planet?: string; days?: number; mode?: "days" | "cargo"; cargoWeight?: number; cargoVolume?: number;
+  planet?: string; days?: number; mode?: "days" | "cargo" | "fill"; cargoWeight?: number; cargoVolume?: number;
 }) {
   const r = g.resupply!;
   const was = autoName(g);
@@ -408,6 +410,7 @@ function changeSpec(g: MaterialGroup, patch: {
   if (patch.days != null) r.days = Math.max(1, Math.round(patch.days) || 1);
   if (patch.mode) {
     r.mode = patch.mode;
+    if (patch.mode !== "fill") r.fillAt = undefined;
     // 切到「装满货舱」时先用当前选的船的货舱大小
     if (patch.mode === "cargo") {
       r.cargoWeight ??= workspace.shipWeight || 500;
@@ -422,6 +425,12 @@ function changeSpec(g: MaterialGroup, patch: {
 /** force = false：只是换了排除的材料，FIO 的数据用几分钟内取过的就行 */
 async function refreshGroup(g: MaterialGroup, force = true) {
   if (!g.resupply) return;
+  if (g.resupply.mode === "fill") {
+    const at = fillSite(g);
+    if (at) await fillWaypoint(at.route, at.wp, force);
+    else say(`「${g.name}」是按路线上的某一站塞满的，但那一站已经不在了或不再装它：换成别的方式，或到要装它的那一站点「塞满货舱」。`, true);
+    return;
+  }
   busy.value = g.id;
   try {
     const got = await resupply(g.resupply, materials.value, force, g.excluded);
@@ -443,7 +452,86 @@ async function refreshGroup(g: MaterialGroup, force = true) {
   }
 }
 async function refreshAll() {
-  for (const g of workspace.groups.filter((x) => x.resupply)) await refreshGroup(g);
+  // 塞满的组一站只算一次（同一站的几个组是一起算的）
+  const done = new Set<string>();
+  for (const g of workspace.groups.filter((x) => x.resupply)) {
+    const at = g.resupply!.mode === "fill" ? fillSite(g) : null;
+    if (at && done.has(at.wp.id)) continue;
+    if (at) done.add(at.wp.id);
+    await refreshGroup(g);
+  }
+}
+
+// ---- 塞满：按这一站装的补给组把船舱剩下的空间分掉 ----
+/** 这一站装的补给组，按第一次出现的顺序 */
+function fillGroupsAt(wp: Waypoint): MaterialGroup[] {
+  const ids = [...new Set(wp.steps.flatMap((s) => (s.kind === "group" && s.op === "LOAD" ? [s.groupId] : [])))];
+  return ids.map((id) => workspace.groups.find((g) => g.id === id))
+    .filter((g): g is MaterialGroup => !!g?.resupply);
+}
+/** 塞满模式的组是在哪一站塞的；那一站不在了或不再装它就是 null */
+function fillSite(g: MaterialGroup): { route: RouteDoc; wp: Waypoint } | null {
+  const at = g.resupply?.fillAt;
+  if (!at) return null;
+  const r = workspace.routes.find((x) => x.id === at.routeId);
+  const wp = r?.waypoints.find((w) => w.id === at.waypointId);
+  return r && wp && fillGroupsAt(wp).includes(g) ? { route: r, wp } : null;
+}
+/**
+ * 先把这些补给组当成空的展开一遍，得到离开这一站时船上的其他货物
+ * （这一站装的别的东西 + 前面带过来还没卸的），船舱扣掉它们剩下的空间，
+ * 由这些补给组按同一个天数分掉，取装得下的最大天数。
+ */
+async function fillWaypoint(r: RouteDoc, wp: Waypoint, force = true) {
+  const where = destinationLabel(wp.destination);
+  const fills = fillGroupsAt(wp);
+  if (!fills.length) {
+    say(`${where} 没有装补给组：先把补给组拖到这一站（装货），再点塞满。`, true);
+    return;
+  }
+  const shipWeight = Number(workspace.shipWeight) || 0;
+  const shipVolume = Number(workspace.shipVolume) || 0;
+  if (!(shipWeight > 0) || !(shipVolume > 0)) {
+    say("先在路线上方填货舱的载重和容积，或者选一艘船。", true);
+    return;
+  }
+  const ids = new Set(fills.map((g) => g.id));
+  const others = compileWith(r, workspace.groups.map((g) => (ids.has(g.id) ? { ...g, materials: {} } : g)));
+  const leg = others.legs.find((l) => l.waypointId === wp.id);
+  const used = { weight: leg?.weight ?? 0, volume: leg?.volume ?? 0 };
+  const room = { weight: shipWeight - used.weight, volume: shipVolume - used.volume };
+  busy.value = `fill:${wp.id}`;
+  try {
+    const got = await resupplyFill(
+      fills.map((g) => ({ spec: g.resupply!, excluded: g.excluded ?? [] })), materials.value, room, force);
+    fills.forEach((g, i) => {
+      const res = got.results[i];
+      const spec = g.resupply!;
+      const was = autoName(g);
+      spec.mode = "fill";
+      spec.fillAt = { routeId: r.id, waypointId: wp.id };
+      spec.fitDays = got.days;
+      spec.planetName = res.planetName;
+      spec.updatedAt = Date.now();
+      g.materials = res.materials;
+      if (!g.name || g.name === was) { g.name = autoName(g); renameGroup(g); }
+      if (openGroup.value === g.id) showGroup(g);
+    });
+    const size = (x: { weight: number; volume: number }) => `${x.weight.toFixed(1)} t / ${x.volume.toFixed(1)} m³`;
+    const open = leg && !leg.exact
+      ? `「装满」的 ${leg.open.join("、")} 数量不确定，没算进其他货物，实际可能装不下。` : "";
+    if (room.weight <= 0 || room.volume <= 0) {
+      say(`${where}：其他货物已经占了 ${size(used)}，船舱满了，补给组一件也带不了。${open}`, true);
+    } else {
+      const daysText = got.days >= 3650 ? "3650 天以上" : `${got.days.toFixed(1)} 天`;
+      say(`已在 ${where} 塞满：其他货物占 ${size(used)}，剩下的 ${size(room)} 分给 ${fills.length} 个补给组`
+        + `（${fills.map((g) => g.name).join("、")}），都补到 ${daysText}。${open}`, !!open);
+    }
+  } catch (e) {
+    fioFailed(e);
+  } finally {
+    busy.value = "";
+  }
 }
 function ago(at: number): string {
   if (!at) return "还没算过";
@@ -596,8 +684,13 @@ function importPaste() {
                           @change="changeSpec(g, { mode: ($event.target as HTMLSelectElement).value as 'days' | 'cargo' })">
                     <option value="days">补到指定天数</option>
                     <option value="cargo">装满指定大小的货舱</option>
+                    <option v-if="g.resupply.mode === 'fill'" value="fill">由路线上的一站塞满</option>
                   </select></label>
-                <label v-if="g.resupply.mode !== 'cargo'">补到
+                <div v-if="g.resupply.mode === 'fill'" class="dim"
+                     title="和这一站装的别的补给组一起，分掉船舱扣掉其他货物后剩下的空间，都补到同一个天数。点「更新」重算">
+                  {{ fillSite(g) ? `在 ${destinationLabel(fillSite(g)!.wp.destination)} 塞满` : "塞满它的那一站已经不在了" }}，相当于补到
+                  {{ (g.resupply.fitDays ?? 0) >= 3650 ? "3650 天以上" : `${(g.resupply.fitDays ?? 0).toFixed(1)} 天` }}</div>
+                <label v-else-if="g.resupply.mode !== 'cargo'">补到
                   <input :value="g.resupply.days" class="days" type="number" min="1" step="1"
                          @change="changeSpec(g, { days: Number(($event.target as HTMLInputElement).value) })" /> 天</label>
                 <template v-else>
@@ -747,7 +840,8 @@ function importPaste() {
                         :route="route" :wp="wp" :index="i" :groups="workspace.groups" :materials="materials"
                         :leg="legFor(wp)" :issues="issuesFor(wp)" :loading-products="busy === `products:${wp.id}`"
                         @remove="removeWaypoint(i)" @move="moveWaypoint(i, $event)" @size="heights[wp.id] = $event"
-                        @products="addProducts(wp)" />
+                        :filling="busy === `fill:${wp.id}`"
+                        @products="addProducts(wp)" @fill="fillWaypoint(route, wp)" />
           <template v-if="estimate">
             <span v-for="leg in estimate.legs" :key="leg.toIndex" class="leg" :class="{ unknown: leg.unknown }" :title="legTitle(leg)"
                   :style="leg.toIndex > 0

@@ -80,14 +80,19 @@ export interface RouteDoc {
 export interface ResupplySpec {
   planet: string;
   planetName: string;
-  /** "days" = 补到 days 天；"cargo" = 把给定大小的货舱装满，天数由它反推 */
-  mode?: "days" | "cargo";
+  /**
+   * "days" = 补到 days 天；"cargo" = 把给定大小的货舱装满，天数由它反推；
+   * "fill" = 由路线上的某一站「塞满」：和那一站装的别的补给组一起，分掉船舱扣掉其他货物后剩下的空间
+   */
+  mode?: "days" | "cargo" | "fill";
   days: number;
   /** cargo 模式下的货舱大小：载重 t、容积 m³ */
   cargoWeight?: number;
   cargoVolume?: number;
-  /** cargo 模式下算出来相当于补到几天 */
+  /** cargo / fill 模式下算出来相当于补到几天 */
   fitDays?: number;
+  /** fill 模式：在哪条路线的哪一站塞满 */
+  fillAt?: { routeId: string; waypointId: string };
   includeLuxuries: boolean;
   /** 扣掉基地里已有的库存 */
   deductStock: boolean;
