@@ -189,6 +189,11 @@ function normalizeStep(s: Json): Step | null {
       return { id, kind: "refuel", fuel: s.fuel === "FTL" ? "FTL" : "STL",
                source: s.source === "SHIP_STORE" ? "SHIP_STORE" : "LOCAL_STORE",
                min: amount(s.min, abs(100)), max: amount(s.max, cap()) };
+    case "unloadAll":
+      return { id, kind: "unloadAll" };
+    case "unloadFuel":
+      return { id, kind: "unloadFuel", fuel: s.fuel === "FTL" ? "FTL" : "STL",
+               min: amount(s.min, abs(0)), max: amount(s.max, cap()) };
     case "wait": {
       const units = ["SECONDS", "MINUTES", "HOURS", "DAYS"] as const;
       const unit = units.find((u) => u === s.unit) ?? "MINUTES";
@@ -220,6 +225,9 @@ function fromGame(game: GameRoute): RouteDoc {
           return { id, kind: "material", op: "UNLOAD", ticker: s.material, min: s.minimum, max: s.maximum, retain: 0 };
         case "REFUEL":
           return { id, kind: "refuel", fuel: s.fuel, source: s.source, min: s.minimum, max: s.maximum };
+        case "UNLOAD_ALL": return { id, kind: "unloadAll" };
+        case "UNLOAD_FUEL":
+          return { id, kind: "unloadFuel", fuel: s.fuel, min: s.minimum, max: s.maximum };
         case "WAIT":
           return { id, kind: "wait", amount: s.amount, unit: s.unit };
         case "LOAD_SHIPMENT": return { id, kind: "loadShipment" };

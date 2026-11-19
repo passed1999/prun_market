@@ -182,7 +182,7 @@ export interface FuelOptions {
 
 /**
  * cargoAfter[i] = 离开第 i 站时船上的货（吨），来自 compile 的结果。
- * 燃料：出发时按 fuel.start（默认满油箱）；递减时遇到 STL 加油步骤就加（加到满 / 加指定数量）。
+ * 燃料：出发时按 fuel.start（默认满油箱）；递减时遇到 STL 加油步骤就加（加到满 / 加指定数量），遇到 STL 卸燃料步骤就减。
  * 循环路线在没指定启航燃油量时多走一圈取稳定状态；指定了就只算从这个油量出发的第一圈。
  */
 export async function estimateRoute(
@@ -203,6 +203,10 @@ export async function estimateRoute(
       if (s.type === "WAIT") wait += s.amount * (WAIT[s.unit] ?? 1);
       if (options.carry && s.type === "REFUEL" && s.fuel === "STL") {
         fuel = s.maximum.type === "CAPACITY" ? ship.stlCapacity : Math.min(ship.stlCapacity, fuel + s.maximum.units);
+      }
+      // 卸燃料：最多卸 maximum（CAPACITY = 油箱里的全部），船上不够 minimum 时游戏会停在这一步等，这里按能卸多少卸多少
+      if (options.carry && s.type === "UNLOAD_FUEL" && s.fuel === "STL") {
+        fuel = s.maximum.type === "CAPACITY" ? 0 : Math.max(0, fuel - s.maximum.units);
       }
     }
     return wait;

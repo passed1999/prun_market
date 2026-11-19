@@ -216,6 +216,9 @@ function isDefault(s: GameStep): boolean {
       return s.fuel === "STL" && s.source === "LOCAL_STORE" && sameAmount(s.minimum, abs(100)) && s.maximum.type === "CAPACITY";
     case "WAIT":
       return s.amount === 1 && s.unit === "MINUTES";
+    case "UNLOAD_FUEL":
+      // 游戏在服务器端建步骤，前端看不到初值，按要编辑算
+      return false;
     default:
       return true;
   }
@@ -242,6 +245,13 @@ export function compile(route: RouteDoc, groupList: MaterialGroup[], opts: Compi
       const here = { ...at, stepId: s.id };
       if (s.kind === "refuel") {
         steps.push({ type: "REFUEL", fuel: s.fuel, source: s.source, minimum: s.min, maximum: s.max });
+      } else if (s.kind === "unloadFuel") {
+        if (s.min.type === "ABSOLUTE" && s.max.type === "ABSOLUTE" && s.min.units > s.max.units) {
+          issues.push({ level: "error", ...here, text: "卸燃料的最小值比最大值大。" });
+        }
+        steps.push({ type: "UNLOAD_FUEL", fuel: s.fuel, minimum: s.min, maximum: s.max });
+      } else if (s.kind === "unloadAll") {
+        steps.push({ type: "UNLOAD_ALL" });
       } else if (s.kind === "wait") {
         if (s.amount < 0 || toSeconds(s.amount, s.unit) > 30 * 86400) {
           issues.push({ level: "error", ...here, text: "等待时间要在 0 到 30 天之间。" });
@@ -365,6 +375,10 @@ function simulate(route: RouteDoc, game: GameRoute, opts: CompileOptions, issues
             cargo[s.material] = (cargo[s.material] ?? 0) + s.maximum.units;
             move(s.material, -s.maximum.units);
           }
+        } else if (s.type === "UNLOAD_ALL") {
+          for (const [t, n] of Object.entries(cargo)) move(t, n);
+          for (const t of Object.keys(cargo)) delete cargo[t];
+          unknown.clear();
         } else if (s.type === "UNLOAD") {
           const aboard = cargo[s.material] ?? 0;
           move(s.material, s.maximum.type === "CAPACITY" ? aboard : Math.min(aboard, s.maximum.units));

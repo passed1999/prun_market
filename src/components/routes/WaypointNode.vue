@@ -44,7 +44,9 @@ const ADD: { kind: StepKind; op?: Op; label: string; title: string }[] = [
   { kind: "material", op: "UNLOAD", label: "卸货", title: "卸一种材料" },
   { kind: "group", op: "LOAD", label: "材料组", title: "装 / 卸一整个材料组，数量按组里的精确值" },
   { kind: "mirror", op: "UNLOAD", label: "引用", title: "装 / 卸另一个 waypoint 的装或卸的内容" },
+  { kind: "unloadAll", label: "全部卸货", title: "把货舱里的所有材料卸到这里" },
   { kind: "refuel", label: "加油", title: "给 STL 或 FTL 油箱加油" },
+  { kind: "unloadFuel", label: "卸燃料", title: "把 STL 或 FTL 油箱里的燃料卸到这里的仓库" },
   { kind: "wait", label: "等待", title: "在这里停一段时间" },
   { kind: "loadShipment", label: "装运单", title: "装上要送往后面 waypoint 的运单货物" },
   { kind: "unloadShipment", label: "卸运单", title: "卸下送到这里的运单货物" },
@@ -257,6 +259,19 @@ const nodeIssues = computed(() => props.issues.filter((i) => !i.stepId));
           <AmountInput v-model="step.min" cap-label="加满" title="最小值：油源不够这个数就等" />
           <span class="dim">–</span>
           <AmountInput v-model="step.max" cap-label="加满" title="最大值" />
+        </template>
+
+        <template v-else-if="step.kind === 'unloadFuel'">
+          <span class="kind">卸燃料</span>
+          <select v-model="step.fuel"><option value="STL">STL</option><option value="FTL">FTL</option></select>
+          <AmountInput v-model="step.min" cap-label="全部" title="最小值：油箱里不够这个数就等" />
+          <span class="dim">–</span>
+          <AmountInput v-model="step.max" cap-label="全部" title="最大值" />
+        </template>
+
+        <template v-else-if="step.kind === 'unloadAll'">
+          <span class="kind">全部卸货</span>
+          <span class="dim note">卸下货舱里的所有材料</span>
         </template>
 
         <template v-else-if="step.kind === 'wait'">

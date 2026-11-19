@@ -29,12 +29,19 @@ export interface MirrorStep extends StepBase {
 export interface RefuelStep extends StepBase {
   kind: "refuel"; fuel: "STL" | "FTL"; source: "LOCAL_STORE" | "SHIP_STORE"; min: Amount; max: Amount;
 }
+/** 卸下货舱里的所有材料 */
+export interface UnloadAllStep extends StepBase { kind: "unloadAll" }
+/** 从油箱卸燃料到当地仓库；CAPACITY 在这里是「油箱里的全部」 */
+export interface UnloadFuelStep extends StepBase {
+  kind: "unloadFuel"; fuel: "STL" | "FTL"; min: Amount; max: Amount;
+}
 export interface WaitStep extends StepBase { kind: "wait"; amount: number; unit: WaitUnit }
 export interface LoadShipmentStep extends StepBase { kind: "loadShipment" }
 export interface UnloadShipmentStep extends StepBase { kind: "unloadShipment" }
 export type ShipmentStep = LoadShipmentStep | UnloadShipmentStep;
 
-export type Step = MaterialStep | GroupStep | MirrorStep | RefuelStep | WaitStep | ShipmentStep;
+export type Step =
+  | MaterialStep | GroupStep | MirrorStep | UnloadAllStep | RefuelStep | UnloadFuelStep | WaitStep | ShipmentStep;
 export type StepKind = Step["kind"];
 
 export interface Destination {
@@ -115,7 +122,9 @@ export function activeMaterials(g: MaterialGroup): Record<string, number> {
 export type GameStep =
   | { type: "LOAD"; material: string; minimum: Amount; maximum: Amount; retain: number }
   | { type: "UNLOAD"; material: string; minimum: Amount; maximum: Amount }
+  | { type: "UNLOAD_ALL" }
   | { type: "REFUEL"; fuel: "STL" | "FTL"; source: "LOCAL_STORE" | "SHIP_STORE"; minimum: Amount; maximum: Amount }
+  | { type: "UNLOAD_FUEL"; fuel: "STL" | "FTL"; minimum: Amount; maximum: Amount }
   | { type: "WAIT"; amount: number; unit: WaitUnit }
   | { type: "LOAD_SHIPMENT" }
   | { type: "UNLOAD_SHIPMENT" };
@@ -153,6 +162,8 @@ export function newStep(kind: StepKind, op: Op = "LOAD"): Step {
     case "group": return { id, kind, op, groupId: "", groupName: "" };
     case "mirror": return { id, kind, op, waypointId: "", sourceOp: op === "LOAD" ? "UNLOAD" : "LOAD" };
     case "refuel": return { id, kind, fuel: "STL", source: "LOCAL_STORE", min: abs(100), max: cap() };
+    // 游戏在服务器端建新步骤，「卸燃料」的初值前端看不到，这里取「把这个油箱卸空」
+    case "unloadFuel": return { id, kind, fuel: "STL", min: abs(0), max: cap() };
     case "wait": return { id, kind, amount: 1, unit: "MINUTES" };
     case "loadShipment": return { id, kind };
     default: return { id, kind };

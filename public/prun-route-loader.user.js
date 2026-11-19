@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PrUn Route Loader
 // @namespace    prun-market
-// @version      0.6.1
+// @version      0.7.0
 // @description  把路线编辑器导出的 json 半自动配置到游戏里的 RT（每点一下执行一步）
 // @match        https://apex.prosperousuniverse.com/*
 // @grant        none
@@ -75,6 +75,8 @@
         return { type: "UNLOAD", material: s.material.ticker, minimum: amt(s.minimum), maximum: amt(s.maximum) };
       case "REFUEL":
         return { type: "REFUEL", fuel: s.fuel, source: s.source, minimum: amt(s.minimum), maximum: amt(s.maximum) };
+      case "UNLOAD_FUEL":
+        return { type: "UNLOAD_FUEL", fuel: s.fuel, minimum: amt(s.minimum), maximum: amt(s.maximum) };
       case "WAIT":
         return { type: "WAIT", amount: s.amount, unit: s.unit };
       default:
@@ -136,16 +138,18 @@
       case "LOAD": return a.material === b.material && amtEq(a.minimum, b.minimum) && amtEq(a.maximum, b.maximum) && a.retain === b.retain;
       case "UNLOAD": return a.material === b.material && amtEq(a.minimum, b.minimum) && amtEq(a.maximum, b.maximum);
       case "REFUEL": return a.fuel === b.fuel && a.source === b.source && amtEq(a.minimum, b.minimum) && amtEq(a.maximum, b.maximum);
+      case "UNLOAD_FUEL": return a.fuel === b.fuel && amtEq(a.minimum, b.minimum) && amtEq(a.maximum, b.maximum);
       case "WAIT": return a.amount === b.amount && a.unit === b.unit;
       default: return true;
     }
   }
-  /** 游戏里点「添加」后得到的默认步骤 */
+  /** 游戏里点「添加」后得到的默认步骤。UNLOAD_FUEL 的初值由服务器定、前端看不到，所以不列，添加后总是再编辑一次 */
   const FRESH = {
     LOAD: { type: "LOAD", material: "DW", minimum: { type: "ABSOLUTE", units: 1 }, maximum: { type: "ABSOLUTE", units: 100 }, retain: 0 },
     UNLOAD: { type: "UNLOAD", material: "DW", minimum: { type: "ABSOLUTE", units: 1 }, maximum: { type: "ABSOLUTE", units: 100 } },
     REFUEL: { type: "REFUEL", fuel: "STL", source: "LOCAL_STORE", minimum: { type: "ABSOLUTE", units: 100 }, maximum: { type: "CAPACITY", units: 0 } },
     WAIT: { type: "WAIT", amount: 1, unit: "MINUTES" },
+    UNLOAD_ALL: { type: "UNLOAD_ALL" },
     LOAD_SHIPMENT: { type: "LOAD_SHIPMENT" },
     UNLOAD_SHIPMENT: { type: "UNLOAD_SHIPMENT" },
   };
@@ -153,15 +157,19 @@
   const wpSettingsEq = (a, b) => a.fuel === b.fuel && a.reactor === b.reactor
     && a.ftlPreference === b.ftlPreference && a.useGateways === b.useGateways;
 
-  const STEP_NAME = { LOAD: "装货", UNLOAD: "卸货", REFUEL: "加油", WAIT: "等待", LOAD_SHIPMENT: "装运单", UNLOAD_SHIPMENT: "卸运单" };
+  const STEP_NAME = {
+    LOAD: "装货", UNLOAD: "卸货", UNLOAD_ALL: "全部卸货", REFUEL: "加油", UNLOAD_FUEL: "卸燃料",
+    WAIT: "等待", LOAD_SHIPMENT: "装运单", UNLOAD_SHIPMENT: "卸运单",
+  };
   const showAmt = (a, capWord) => (a.type === "CAPACITY" ? capWord : String(a.units));
   function describe(s) {
     switch (s.type) {
       case "LOAD": return `装 ${s.material} ${showAmt(s.minimum, "装满")}–${showAmt(s.maximum, "装满")}${s.retain ? `，留 ${s.retain}` : ""}`;
       case "UNLOAD": return `卸 ${s.material} ${showAmt(s.minimum, "全部")}–${showAmt(s.maximum, "全部")}`;
       case "REFUEL": return `加油 ${s.fuel}（${s.source === "LOCAL_STORE" ? "当地仓库" : "船上货舱"}）${showAmt(s.minimum, "加满")}–${showAmt(s.maximum, "加满")}`;
+      case "UNLOAD_FUEL": return `卸燃料 ${s.fuel} ${showAmt(s.minimum, "全部")}–${showAmt(s.maximum, "全部")}`;
       case "WAIT": return `等待 ${s.amount} ${{ SECONDS: "秒", MINUTES: "分钟", HOURS: "小时", DAYS: "天" }[s.unit]}`;
-      default: return STEP_NAME[s.type];
+      default: return STEP_NAME[s.type] || s.type;
     }
   }
   const destText = (d) => (d.name && d.name !== d.naturalId ? `${d.name} (${d.naturalId})` : d.naturalId);
@@ -202,7 +210,7 @@
       for (let j = common; j < tw.steps.length; j++) {
         const ts = tw.steps[j];
         acts.push({ kind: "addStep", i, j, label: `第 ${n} 站：添加第 ${j + 1} 步（${STEP_NAME[ts.type]}）` });
-        if (!stepEq(FRESH[ts.type], ts)) {
+        if (!FRESH[ts.type] || !stepEq(FRESH[ts.type], ts)) {
           acts.push({ kind: "editStep", i, j, label: `第 ${n} 站第 ${j + 1} 步：改成 ${describe(ts)}` });
         }
       }
@@ -356,7 +364,10 @@
     }
   }
 
-  const ADD_BUTTON = { LOAD: "Load", UNLOAD: "Unload", REFUEL: "Refuel", WAIT: "Wait", LOAD_SHIPMENT: "Load shipment", UNLOAD_SHIPMENT: "Unload shipment" };
+  const ADD_BUTTON = {
+    LOAD: "Load", UNLOAD: "Unload", UNLOAD_ALL: "Unload all", REFUEL: "Refuel", UNLOAD_FUEL: "Unload fuel",
+    WAIT: "Wait", LOAD_SHIPMENT: "Load shipment", UNLOAD_SHIPMENT: "Unload shipment",
+  };
 
   async function fillStep(form, ts) {
     if (ts.type === "LOAD" || ts.type === "UNLOAD") {
@@ -367,6 +378,11 @@
     } else if (ts.type === "REFUEL") {
       await chooseRadio(form, "Tank", ts.fuel === "FTL" ? 1 : 0);
       await chooseRadio(form, "Fuel source", ts.source === "LOCAL_STORE" ? 1 : 0);
+      await setAmount(form, "Minimum", "minimum.units", ts.minimum);
+      await setAmount(form, "Maximum", "maximum.units", ts.maximum);
+    } else if (ts.type === "UNLOAD_FUEL") {
+      // 和加油同一个表单，只是没有「Fuel source」
+      await chooseRadio(form, "Tank", ts.fuel === "FTL" ? 1 : 0);
       await setAmount(form, "Minimum", "minimum.units", ts.minimum);
       await setAmount(form, "Maximum", "maximum.units", ts.maximum);
     } else if (ts.type === "WAIT") {
