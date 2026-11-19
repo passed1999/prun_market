@@ -15,7 +15,7 @@ import { account, baseProducts, FioError, listBases, localStocks, resupply, resu
 import { buildBuyPlan } from "../routes/act";
 import { fio } from "../data/sources";
 import { copyText, download, ImportError, parseFile, parseGroupContent, safeName, toText } from "../routes/io";
-import type { MaterialGroup, RouteDoc, Step, Waypoint } from "../routes/model";
+import type { MaterialGroup, Op, RouteDoc, Step, Waypoint } from "../routes/model";
 import { abs, activeMaterials, cap, destinationLabel, newGroup, newId, newRoute, newWaypoint } from "../routes/model";
 import { relinkGroups, upsertGroups, upsertRoute, workspace } from "../routes/store";
 
@@ -463,10 +463,26 @@ async function refreshAll() {
 }
 
 // ---- 塞满：按这一站装的补给组把船舱剩下的空间分掉 ----
-/** 这一站装的补给组，按第一次出现的顺序 */
-function fillGroupsAt(wp: Waypoint): MaterialGroup[] {
-  const ids = [...new Set(wp.steps.flatMap((s) => (s.kind === "group" && s.op === "LOAD" ? [s.groupId] : [])))];
-  return ids.map((id) => workspace.groups.find((g) => g.id === id))
+/**
+ * 这一站装的补给组，按第一次出现的顺序：直接装的，加上引用别的站的内容里带的
+ * （「装 ← 某站的卸货内容」就取那一站卸的补给组；引用套引用的一路跟下去）
+ */
+function fillGroupsAt(r: RouteDoc, wp: Waypoint): MaterialGroup[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const walk = (w: Waypoint, op: Op) => {
+    if (seen.has(`${w.id}:${op}`)) return;
+    seen.add(`${w.id}:${op}`);
+    for (const s of w.steps) {
+      if (s.kind === "group" && s.op === op) ids.push(s.groupId);
+      else if (s.kind === "mirror" && s.op === op) {
+        const src = r.waypoints.find((x) => x.id === s.waypointId);
+        if (src) walk(src, s.sourceOp);
+      }
+    }
+  };
+  walk(wp, "LOAD");
+  return [...new Set(ids)].map((id) => workspace.groups.find((g) => g.id === id))
     .filter((g): g is MaterialGroup => !!g?.resupply);
 }
 /** 塞满模式的组是在哪一站塞的；那一站不在了或不再装它就是 null */
@@ -475,7 +491,7 @@ function fillSite(g: MaterialGroup): { route: RouteDoc; wp: Waypoint } | null {
   if (!at) return null;
   const r = workspace.routes.find((x) => x.id === at.routeId);
   const wp = r?.waypoints.find((w) => w.id === at.waypointId);
-  return r && wp && fillGroupsAt(wp).includes(g) ? { route: r, wp } : null;
+  return r && wp && fillGroupsAt(r, wp).includes(g) ? { route: r, wp } : null;
 }
 /**
  * 先把这些补给组当成空的展开一遍，得到离开这一站时船上的其他货物
@@ -484,9 +500,9 @@ function fillSite(g: MaterialGroup): { route: RouteDoc; wp: Waypoint } | null {
  */
 async function fillWaypoint(r: RouteDoc, wp: Waypoint, force = true) {
   const where = destinationLabel(wp.destination);
-  const fills = fillGroupsAt(wp);
+  const fills = fillGroupsAt(r, wp);
   if (!fills.length) {
-    say(`${where} 没有装补给组：先把补给组拖到这一站（装货），再点塞满。`, true);
+    say(`${where} 没有装补给组：先把补给组拖到这一站（装货），或者引用别的站卸的补给组，再点塞满。`, true);
     return;
   }
   const shipWeight = Number(workspace.shipWeight) || 0;
