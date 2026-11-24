@@ -3,6 +3,8 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { errorText } from "../api/client";
 import { categoryColor, categoryLabel, categoryTextColor } from "../api/materials";
 import { fio } from "../data/sources";
+import type { FertilePlanet } from "../data/sources";
+import { EXPERT_FACTORS, fertilityFactor } from "../services/base";
 import * as profit from "../services/profit";
 import type { ExchangeCode, PriceSource, ProfitAnalysis, ProfitRecipe } from "../api/types";
 
@@ -36,6 +38,35 @@ watch([buy, sell], () => {
   try { localStorage.setItem(PREF_KEY, JSON.stringify({ buy, sell })); } catch { /* 隐私模式 */ }
 }, { deep: true });
 
+// 基地条件也记在浏览器里
+const BASE_KEY = "prun-market.profit.base";
+const PROMITOR = "VH-331a";
+function loadBase(): profit.ProfitBase {
+  const out: profit.ProfitBase = { cogc: true, experts: 0, planet: PROMITOR, housing: true, environment: true };
+  try {
+    const raw = JSON.parse(localStorage.getItem(BASE_KEY) ?? "null");
+    if (!raw || typeof raw !== "object") return out;
+    for (const k of ["cogc", "housing", "environment"] as const) if (typeof raw[k] === "boolean") out[k] = raw[k];
+    if (typeof raw.planet === "string") out.planet = raw.planet;
+    if (EXPERT_FACTORS[raw.experts]) out.experts = Number(raw.experts);
+  } catch { /* 隐私模式或内容损坏 */ }
+  return out;
+}
+const baseCfg = reactive(loadBase());
+watch(baseCfg, () => {
+  try { localStorage.setItem(BASE_KEY, JSON.stringify(baseCfg)); } catch { /* 隐私模式 */ }
+  if (data.value) load(true);
+});
+const planets = ref<FertilePlanet[]>([]);
+
+function pct(v: number): string {
+  return `${num(v * 100, 2)}%`;
+}
+
+function housingText(r: ProfitRecipe): string {
+  return (r.housing ?? []).map((h) => `${num(h.count, 2)} ${h.ticker}`).join(" + ");
+}
+
 const ticker = ref("");
 const tickers = ref<string[]>([]);
 const data = ref<ProfitAnalysis | null>(null);
@@ -50,9 +81,16 @@ onMounted(async () => {
   try {
     tickers.value = (await fio.materials()).map((m) => m.Ticker).sort();
   } catch { /* 候选列表拿不到不影响手动输入 */ }
+  try {
+    planets.value = await fio.fertilePlanets();
+    if (!planets.value.some((p) => p.id === baseCfg.planet)) baseCfg.planet = PROMITOR;
+  } catch (e) {
+    error.value = errorText(e);
+  }
 });
 
-async function load() {
+/** keepEdits：只改了基地条件，手动改过的价格留着 */
+async function load(keepEdits = false) {
   const wanted = ticker.value.trim().toUpperCase();
   if (!wanted) return;
   busy.value = true;
@@ -61,10 +99,13 @@ async function load() {
     const result = await profit.analyze(wanted, {
       exchange: buy.exchange, price_source: buy.price_source,
       sell_exchange: sell.exchange, sell_price_source: sell.price_source,
+      base: { ...baseCfg },
     });
+    const edits = keepEdits ? Object.entries(prices).filter(([key]) => changed(key)) : [];
     data.value = result;
     ticker.value = result.ticker;
     resetPrices();
+    for (const [key, v] of edits) if (key in prices) prices[key] = v;
     const best = [...result.recipes].sort((a, b) => perArea(b) - perArea(a))[0];
     if (!result.recipes.some((r) => r.recipe_id === recipeId.value)) recipeId.value = best.recipe_id;
   } catch (e) {
@@ -264,6 +305,29 @@ function formula(id: string): string {
         <option v-for="s in SOURCES" :key="s" :value="s">{{ SOURCE_LABEL[s] }}</option>
       </select>
     </label>
+    <label title="星球的 CoGC 项目与建筑专业对口，效率 ×1.25">
+      <input v-model="baseCfg.cogc" type="checkbox" /> CoGC
+    </label>
+    <label title="对口专家人数">
+      专家
+      <select v-model="baseCfg.experts">
+        <option v-for="(f, n) in EXPERT_FACTORS" :key="n" :value="n">{{ n }}（{{ pct(f) }}）</option>
+      </select>
+    </label>
+    <label title="肥力只影响 FRM / ORC；环境建材也按这颗星球算">
+      星球
+      <select v-model="baseCfg.planet">
+        <option v-for="p in planets" :key="p.id" :value="p.id">
+          {{ p.name === p.id ? p.id : `${p.name} (${p.id})` }} · 肥力 {{ pct(fertilityFactor(p.fertility)) }}
+        </option>
+      </select>
+    </label>
+    <label title="计入住下该建筑工人所需住房的面积与造价">
+      <input v-model="baseCfg.housing" type="checkbox" /> 含住房
+    </label>
+    <label title="建造成本计入所选星球的地表与低压附加建材">
+      <input v-model="baseCfg.environment" type="checkbox" /> 含环境建材
+    </label>
     <button type="submit" :disabled="busy || !ticker.trim()">计算</button>
     <span v-if="busy" class="dim">读取中…</span>
   </form>
@@ -274,7 +338,7 @@ function formula(id: string): string {
       <table>
         <thead>
           <tr>
-            <th>建筑</th><th>配方</th><th class="num">面积</th>
+            <th>建筑</th><th>配方</th><th class="num">效率</th><th class="num">面积</th>
             <th class="num">日利润</th><th class="num">每面积日利润</th><th class="num">回本天数</th>
           </tr>
         </thead>
@@ -283,7 +347,8 @@ function formula(id: string): string {
               :class="['row', { picked: r.recipe_id === recipeId }]" @click="recipeId = r.recipe_id">
             <td class="left">{{ r.building }}</td>
             <td class="left">{{ formula(r.recipe_id) }}</td>
-            <td>{{ r.area }}</td>
+            <td>{{ pct(r.efficiency ?? 1) }}</td>
+            <td>{{ num(r.area, 2) }}</td>
             <td :class="totals(r).profit >= 0 ? 'long' : 'short'">{{ num(totals(r).profit) }}</td>
             <td :class="totals(r).profit >= 0 ? 'long' : 'short'">{{ num(totals(r).perArea, 1) }}</td>
             <td>{{ num(totals(r).payback, 1) }}</td>
@@ -313,7 +378,12 @@ function formula(id: string): string {
         </div>
         <div><dt>日收入</dt><dd>{{ num(now.revenue) }}</dd></div>
         <div><dt>日成本</dt><dd>{{ num(now.inputs + now.workforce) }}</dd></div>
-        <div><dt>面积</dt><dd>{{ recipe.area }}</dd></div>
+        <div><dt>效率</dt><dd>{{ pct(recipe.efficiency ?? 1) }}</dd></div>
+        <div>
+          <dt>面积</dt>
+          <dd>{{ num(recipe.area, 2) }}</dd>
+          <dd v-if="recipe.housing?.length" class="was">含 {{ housingText(recipe) }}</dd>
+        </div>
         <div><dt>建造成本</dt><dd>{{ num(recipe.build_cost) }}</dd></div>
         <div><dt>{{ data.sell_exchange }} 日成交量</dt><dd>{{ num(data.daily_traded) }}</dd></div>
         <div>
@@ -378,9 +448,12 @@ function formula(id: string): string {
   <details v-if="data" class="notes">
     <summary>数据口径</summary>
     <ul>
-      <li>按一座建筑、效率 100% 计算；面积只含这座生产建筑，不含住房。</li>
+      <li>按一座建筑计算。效率 = CoGC（×1.25）× 专家 × 肥力；产出与配方投入都乘效率，工人消耗不变。不含总部派系加成。</li>
+      <li>肥力只作用于 FRM 与 ORC，系数 = 1 + 肥力值 × 10/33；星球列表只有能种植的星球，肥力值为负的低于 100%。</li>
+      <li>「含住房」按工人数配刚好够住的住房（座数可为小数），计入面积与建造成本；不含仓库与核心模块。</li>
+      <li>「含环境建材」按所选星球计：地表每面积 4 MCG，低压（&lt; 0.25）每面积 1 SEA。非农业建筑同样按所选星球算。</li>
       <li>工人消耗按建筑满员、必需品与两种奢侈品全部供应计。</li>
-      <li>建造成本为建筑建材按买入口径的合计，不含星球环境附加建材；回本天数 = 建造成本 ÷ 日利润。</li>
+      <li>建造成本为建筑建材按买入口径的合计；回本天数 = 建造成本 ÷ 日利润。</li>
       <li>买一价、卖一价、均价取自 FIO 当前行情；7 日、30 日均价与全服均价取自 PRUNplanner 的成交额加权均价。</li>
       <li>「达到目标的价格」每一格都只改该行、其余价格保持当前的计算价；点击即写入计算价。「整体」为配方投入全部按同一比例调价。</li>
       <li>日成交量为卖出交易所近 7 日的日均成交量。</li>

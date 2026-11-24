@@ -146,6 +146,9 @@ export interface ProfitRecipe {
   outputs: ProfitLine[];
   inputs: ProfitLine[];
   workforce: ProfitLine[];
+  /** 以下两项仅在按基地条件计算时给出 */
+  efficiency?: number;
+  housing?: { ticker: string; count: number }[];
   build_cost: number;
   build_unpriced: string[];
 }

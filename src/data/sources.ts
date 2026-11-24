@@ -102,6 +102,27 @@ function parseResourceSites(csv: string): ResourceSites {
   return out;
 }
 
+export interface FertilePlanet {
+  id: string;
+  name: string;
+  /** FIO 原值，-1 为不能种；可为负（比标准产量低）*/
+  fertility: number;
+  pressure: number;
+}
+
+/** /csv/planetdetail 里能种地的星球，肥力由高到低 */
+function parseFertilePlanets(csv: string): FertilePlanet[] {
+  const [head, ...rows] = csv.split("\n").map((l) => l.trim().split(","));
+  const [id, name, fertility, pressure] =
+    ["PlanetNaturalId", "PlanetName", "Fertility", "Pressure"].map((c) => head.indexOf(c));
+  return rows
+    .filter((r) => r.length >= 2)
+    .map((r) => ({ id: r[id], name: r[name], fertility: Number(r[fertility]), pressure: Number(r[pressure]) }))
+    .filter((p) => p.fertility > -1)
+    .sort((a, b) => b.fertility - a.fertility);
+}
+
+let fertilePlanets: Promise<FertilePlanet[]> | null = null;
 let resourceCsv: Promise<string> | null = null;
 const planetResourceCsv = () => resourceCsv ??= getText("/api/fio/csv/planetresources")
   .catch((e) => { resourceCsv = null; throw e; });
@@ -115,6 +136,9 @@ export const fio = {
   resourceSites: () => resourceSites ??= planetResourceCsv()
     .then(parseResourceSites)
     .catch((e) => { resourceSites = null; throw e; }),
+  fertilePlanets: () => fertilePlanets ??= getText("/api/fio/csv/planetdetail")
+    .then(parseFertilePlanets)
+    .catch((e) => { fertilePlanets = null; throw e; }),
   materials: () => cached<FioMaterial[]>("/api/fio/material/allmaterials"),
   buildings: () => cached<FioBuilding[]>("/api/fio/building/allbuildings"),
   recipes: () => cached<FioRecipe[]>("/api/fio/recipes/allrecipes"),

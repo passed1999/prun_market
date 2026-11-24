@@ -34,6 +34,7 @@ import { fio } from "../data/sources";
 import type { ResourceForm, ResourceSite, ResourceSites } from "../data/sources";
 import type { ExchangeCode, FioBuilding, PriceSource } from "../api/types";
 import { resolvePrices } from "./prices";
+import { COGC_FACTOR, EXPERT_FACTORS, housingFor, wholeHousingFor } from "./base";
 import { workforceDaily } from "./profit";
 
 const DAY_MS = 86_400_000;
@@ -45,11 +46,8 @@ const EXTRACTORS: Record<ResourceForm, { building: string; daily: number }> = {
 };
 export const FORM_LABEL: Record<ResourceForm, string> = { MINERAL: "固态", GASEOUS: "气态", LIQUID: "液态" };
 
-/** CoGC 加成 */
-export const COGC_FACTOR = 1.25;
-/** 同一专业 5 名专家的加成 */
-export const EXPERT_FACTOR = 1.284;
-export const FULL_EFFICIENCY = COGC_FACTOR * EXPERT_FACTOR;
+/** CoGC 加成 × 同一专业 5 名专家的加成 */
+export const FULL_EFFICIENCY = COGC_FACTOR * EXPERT_FACTORS[5];
 
 /** 派系 → 专业 → 基础加成（许可全部用完时的数）*/
 export const FACTIONS: Record<string, { label: string; bonus: Record<string, number> }> = {
@@ -76,65 +74,6 @@ export function factionFactors(faction: string, level: number, used?: number | n
   const multiplier = 3 - 2 * bases / total;
   return Object.fromEntries(Object.entries(FACTIONS[faction]?.bonus ?? {})
     .map(([expertise, base]) => [expertise, 1 + base * multiplier]));
-}
-
-/** 单级住房：每座住 100 人，下标与 LEVELS 对应 */
-const SINGLE_HOUSING = ["HB1", "HB2", "HB3", "HB4", "HB5"];
-const SINGLE_CAPACITY = 100;
-/** 两级合住：相邻两级各住 75 人。[建筑, 低的那一级的下标]，按省地多少排（HBL 省得最多）*/
-const MIXED_HOUSING: [string, number][] = [["HBL", 3], ["HBM", 2], ["HBC", 1], ["HBB", 0]];
-const MIXED_CAPACITY = 75;
-
-/** 各级工人数（下标同 LEVELS）→ 占地最小的住房配置（座数可为小数）。相邻两级能配对的都合住，从高级往低级配 */
-function housingFor(workers: number[]): { ticker: string; count: number }[] {
-  const left = [...workers];
-  const out: { ticker: string; count: number }[] = [];
-  for (const [ticker, low] of MIXED_HOUSING) {
-    const paired = Math.min(left[low], left[low + 1]);
-    if (paired <= 0) continue;
-    left[low] -= paired;
-    left[low + 1] -= paired;
-    out.push({ ticker, count: paired / MIXED_CAPACITY });
-  }
-  left.forEach((n, i) => {
-    if (n > 1e-9) out.push({ ticker: SINGLE_HOUSING[i], count: n / SINGLE_CAPACITY });
-  });
-  return out;
-}
-
-/**
- * 同上，但座数只能是整数：住得下所有人、占地最小的组合。
- * 第 i 级的人住在「i-1 与 i 合住」「i 与 i+1 合住」和单级住房里，所以沿级别做动态规划，
- * 状态是 i 与 i+1 合住的座数。
- */
-function wholeHousingFor(workers: number[], areaOf: (ticker: string) => number): { ticker: string; count: number }[] {
-  const mixedAt = (low: number) => MIXED_HOUSING.find(([, l]) => l === low)![0];
-  const last = workers.length - 1;
-  // range[i]：i 与 i+1 合住最多值得建几座
-  const range = workers.map((w, i) => i === last ? 0
-    : Math.min(400, Math.ceil(Math.max(w, workers[i + 1]) / MIXED_CAPACITY - 1e-9)));
-  let prev: { cost: number; mixed: number[]; single: number[] }[] = [{ cost: 0, mixed: [], single: [] }];
-  for (let i = 0; i <= last; i++) {
-    const next: typeof prev = [];
-    for (let b = 0; b <= range[i]; b++) {
-      let best: (typeof prev)[number] | null = null;
-      for (let a = 0; a < prev.length; a++) {
-        const uncovered = workers[i] - MIXED_CAPACITY * (a + b);
-        const single = uncovered > 1e-9 ? Math.ceil(uncovered / SINGLE_CAPACITY - 1e-9) : 0;
-        const cost = prev[a].cost + single * areaOf(SINGLE_HOUSING[i]) + (b ? b * areaOf(mixedAt(i)) : 0);
-        if (!best || cost < best.cost) {
-          best = { cost, mixed: [...prev[a].mixed, b], single: [...prev[a].single, single] };
-        }
-      }
-      next.push(best!);
-    }
-    prev = next;
-  }
-  const { mixed, single } = prev[0];
-  const out: { ticker: string; count: number }[] = [];
-  for (const [ticker, low] of MIXED_HOUSING) if (mixed[low]) out.push({ ticker, count: mixed[low] });
-  single.forEach((n, i) => { if (n) out.push({ ticker: SINGLE_HOUSING[i], count: n }); });
-  return out;
 }
 
 export const BUY = "BUY";

@@ -1,14 +1,16 @@
 /**
- * 单条配方的单位面积利润：选一种材料，列出所有能产出它的配方，每条按一座建筑、
- * 标称产能（效率 100%）折成每天的进出，连同市场价一起交给页面。
+ * 单条配方的单位面积利润：选一种材料，列出所有能产出它的配方，每条按一座建筑
+ * 折成每天的进出，连同市场价一起交给页面。
+ * 不给 base 时按标称产能（效率 100%）、只算生产建筑本身；给了则计入 CoGC / 专家 / 肥力、
+ * 住房的面积与造价、星球环境附加建材。
  * 从 prun_selfplanner 的 services/profit.py 移植。
  *
  * 调价、反推都是线性的（利润 = Σ产出×卖价 − Σ投入×买价），页面拿着这里给的数量自己算。
  *
- *     面积      /building/allbuildings 的 AreaCost（只算这座生产建筑，不含住房）
- *     每日轮数  86400000 / TimeMs
+ *     面积      /building/allbuildings 的 AreaCost
+ *     每日轮数  86400000 / TimeMs × 效率
  *     工人消耗  建筑各级工人数 × /global/workforceneeds 的每 100 人日用量（奢侈品两种都计）
- *     建造成本  BuildingCosts × 买入价；不含星球环境附加建材（没有指定星球）
+ *     建造成本  BuildingCosts × 买入价
  *     日成交量  PRUNplanner 公开行情的 avg_traded_7d（卖出交易所，近 7 日日均）
  *
  * 采集类（EXT/RIG/COL）在配方表里只有一条空配方，产量取决于星球资源浓度，这里不出现。
@@ -16,6 +18,7 @@
 import { DataError } from "../api/client";
 import { fio, pp } from "../data/sources";
 import type { ExchangeCode, FioBuilding, PriceSource, ProfitAnalysis, ProfitLine, ProfitRecipe } from "../api/types";
+import { COGC_FACTOR, EXPERT_FACTORS, FERTILITY_BUILDINGS, environmentCosts, fertilityFactor, housingFor } from "./base";
 import { resolvePrices } from "./prices";
 
 const DAY_MS = 86_400_000;
@@ -40,11 +43,22 @@ export function workforceDaily(building: FioBuilding, needs: Record<string, Reco
   return out;
 }
 
+export interface ProfitBase {
+  cogc: boolean;
+  /** 对口专家人数 0–5 */
+  experts: number;
+  /** 有肥力的星球 id；肥力只作用于 FRM / ORC */
+  planet: string;
+  housing: boolean;
+  environment: boolean;
+}
+
 export interface ProfitQuery {
   exchange: ExchangeCode;
   price_source: PriceSource;
   sell_exchange: ExchangeCode;
   sell_price_source: PriceSource;
+  base?: ProfitBase;
 }
 
 export async function analyze(tickerIn: string, q: ProfitQuery): Promise<ProfitAnalysis> {
@@ -69,17 +83,41 @@ export async function analyze(tickerIn: string, q: ProfitQuery): Promise<ProfitA
     throw new DataError(`没有产出 ${ticker} 的配方。采集类材料的产量取决于星球资源，不在此列。`);
   }
 
+  const base = q.base;
+  const planet = base ? (await fio.fertilePlanets()).find((p) => p.id === base.planet) : undefined;
+  if (base && !planet) throw new DataError(`没有星球 ${base.planet} 的肥力数据。`);
+
   const buyTickers = new Set<string>();
   const sellTickers = new Set<string>();
   const drafts = picked.map(([recipe, building]) => {
-    const runs = DAY_MS / recipe.TimeMs;
+    const efficiency = base && planet
+      ? (base.cogc ? COGC_FACTOR : 1) * EXPERT_FACTORS[base.experts]
+        * (FERTILITY_BUILDINGS.includes(building.Ticker) ? fertilityFactor(planet.fertility) : 1)
+      : 1;
+    const runs = DAY_MS / recipe.TimeMs * efficiency;
     const outputs = Object.fromEntries((recipe.Outputs ?? []).map((o) => [o.Ticker, o.Amount * runs]));
     const inputs = Object.fromEntries((recipe.Inputs ?? []).map((i) => [i.Ticker, i.Amount * runs]));
     const workforce = workforceDaily(building, needs);
-    const build = Object.fromEntries((building.BuildingCosts ?? []).map((c) => [c.CommodityTicker, c.Amount]));
+    const housing = base?.housing ? housingFor(WORKERS.map(([, field]) => Number(building[field]) || 0)) : [];
+    const parts = [
+      { b: building, count: 1 },
+      ...housing.flatMap((h) => {
+        const b = buildings.get(h.ticker);
+        return b ? [{ b, count: h.count }] : [];
+      }),
+    ];
+    const area = parts.reduce((sum, { b, count }) => sum + b.AreaCost * count, 0);
+    const build: Record<string, number> = {};
+    const add = (t: string, n: number) => { build[t] = (build[t] ?? 0) + n; };
+    for (const { b, count } of parts) {
+      for (const c of b.BuildingCosts ?? []) add(c.CommodityTicker, c.Amount * count);
+      if (base?.environment && planet) {
+        for (const [t, n] of Object.entries(environmentCosts(b.AreaCost, planet))) add(t, n * count);
+      }
+    }
     for (const t of Object.keys(outputs)) sellTickers.add(t);
     for (const t of [...Object.keys(inputs), ...Object.keys(workforce), ...Object.keys(build)]) buyTickers.add(t);
-    return { recipe, building, outputs, inputs, workforce, build };
+    return { recipe, building, outputs, inputs, workforce, build, area, efficiency, housing };
   });
 
   const [buyPrices, sellPrices] = await Promise.all([
@@ -87,8 +125,11 @@ export async function analyze(tickerIn: string, q: ProfitQuery): Promise<ProfitA
     resolvePrices([...sellTickers].sort(), q.sell_exchange, q.sell_price_source),
   ]);
 
-  const recipes: ProfitRecipe[] = drafts.map(({ recipe, building, outputs, inputs, workforce, build }) => ({
-    recipe_id: recipe.StandardRecipeName, building: building.Ticker, area: building.AreaCost,
+  const recipes: ProfitRecipe[] = drafts.map(({
+    recipe, building, outputs, inputs, workforce, build, area, efficiency, housing,
+  }) => ({
+    recipe_id: recipe.StandardRecipeName, building: building.Ticker, area,
+    ...(base ? { efficiency, housing } : {}),
     outputs: lines(outputs), inputs: lines(inputs), workforce: lines(workforce),
     build_cost: Object.entries(build).reduce((s, [t, n]) => s + (t in buyPrices ? n * buyPrices[t] : 0), 0),
     build_unpriced: Object.keys(build).filter((t) => !(t in buyPrices)).sort(),
